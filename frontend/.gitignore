@@ -1,0 +1,21 @@
+node_modules
+.next
+.next-*
+next-env.d.ts
+.env
+.env.local
+.env*.local
+# Every other env file too: one such as `.env.devnet` carries an RPC key.
+.env*
+!.env.example
+.runtime-keypair.json
+tsconfig.tsbuildinfo
+test-results
+playwright-report
+.traces
+.traces*
+.env.devnet.e2e
+.env.devnet.e2e.*
+# Manual-run output: Playwright drivers, shots and run logs written by hand. Throwaway by
+# design, and a driver left here fails the lint gate.
+.walk-*

@@ -1,0 +1,22 @@
+[package]
+name = "lath-billing"
+version = "0.1.0"
+description = "Lath billing: USDC escrow vault, per-agent allowances and metered deduction"
+edition = "2021"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "lath_billing"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+
+[dependencies]
+anchor-lang = { version = "0.31.1", features = ["init-if-needed"] }
+anchor-spl = { version = "0.31.1", default-features = false, features = ["token", "token_2022"] }

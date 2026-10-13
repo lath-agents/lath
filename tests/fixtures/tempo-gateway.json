@@ -1,0 +1,51 @@
+{
+  "note": "What openrouter.mpp.tempo.xyz answers, re-created by hand from recorded rows: no key, no network and no money is spent by the suite that reads it. `sse` is the gateway's framing verbatim — `event: message` before every chunk, no `data: [DONE]`, and `event: payment-receipt` with the SessionReceipt as the last frame.",
+  "channelId": "0x7f3c9ad2b4e15608a1c0d9e77b2f4a6538e0c1b9d2a7f4e63c85b0917da2ef40",
+  "withUsage": {
+    "status": 200,
+    "body": {
+      "id": "gen-tempo-1",
+      "model": "openai/gpt-4o-mini",
+      "choices": [{ "index": 0, "message": { "role": "assistant", "content": "pong" }, "finish_reason": "stop" }],
+      "usage": { "prompt_tokens": 12, "completion_tokens": 4, "total_tokens": 16, "cost": 0.0000033 }
+    }
+  },
+  "withoutUsage": {
+    "status": 200,
+    "body": {
+      "id": "gen-tempo-2",
+      "model": "openai/gpt-4o-mini",
+      "choices": [{ "index": 0, "message": { "role": "assistant", "content": "pong" }, "finish_reason": "stop" }]
+    }
+  },
+  "streamed": {
+    "status": 200,
+    "sse": [
+      "event: message\n",
+      "data: {\"id\":\"gen-tempo-3\",\"model\":\"openai/gpt-4o-mini\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"po\"}}]}\n\n",
+      "event: message\n",
+      "data: {\"id\":\"gen-tempo-3\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ng\"}}]}\n\n",
+      "event: message\n",
+      "data: {\"id\":\"gen-tempo-3\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":4,\"total_tokens\":16,\"cost\":0.0000033}}\n\n",
+      "event: payment-receipt\n",
+      "data: {\"channelId\":\"0x7f3c9ad2b4e15608a1c0d9e77b2f4a6538e0c1b9d2a7f4e63c85b0917da2ef40\",\"acceptedCumulative\":\"750\",\"spent\":\"750\",\"units\":1}\n\n"
+    ],
+    "body": {
+      "id": "gen-tempo-3",
+      "model": "openai/gpt-4o-mini",
+      "choices": [{ "index": 0, "message": { "role": "assistant", "content": "pong" }, "finish_reason": "stop" }],
+      "usage": { "prompt_tokens": 12, "completion_tokens": 4, "total_tokens": 16, "cost": 0.0000033 }
+    }
+  },
+  "refused": {
+    "status": 402,
+    "body": {
+      "type": "https://mpp.dev/problems/payment-required",
+      "title": "Payment Required",
+      "detail": "the voucher was refused: the channel deposit is below the quoted amount",
+      "amount": "750",
+      "currency": "0x20c000000000000000000000b9537d11c60e8b50"
+    }
+  },
+  "quoteBaseUnits": "750"
+}

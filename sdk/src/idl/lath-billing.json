@@ -1,0 +1,1829 @@
+{
+  "address": "CkZfjbgWBDu4q9YVuxDVnSxnKLukaGkwZuQG7LenKDSA",
+  "metadata": {
+    "name": "lath_billing",
+    "version": "0.1.0",
+    "spec": "0.1.0",
+    "description": "Lath billing: USDC escrow vault, per-agent allowances and metered deduction"
+  },
+  "instructions": [
+    {
+      "name": "approve_agent",
+      "docs": [
+        "Grants (or re-grants) an agent authority the right to charge this user up to `cap`.",
+        "",
+        "A re-grant is a **new** grant: `spent` resets to zero, so `cap` is the full budget the",
+        "agent may spend from this moment on — past spending is not deducted from it. The",
+        "alternative (carry `spent` forward) makes a lowered cap silently unrevocable.",
+        "",
+        "`reserved` is the one field a re-grant leaves alone. It is not history: it is money the",
+        "user's balance is holding right now on this agent's behalf, and zeroing it would leave",
+        "`UserBalance.reserved` with no grant able to release it — the stranding this field exists",
+        "to close. It counts against the new cap, as a live hold should."
+      ],
+      "discriminator": [
+        140,
+        178,
+        210,
+        2,
+        130,
+        212,
+        128,
+        251
+      ],
+      "accounts": [
+        {
+          "name": "user",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "treasury",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  116,
+                  114,
+                  101,
+                  97,
+                  115,
+                  117,
+                  114,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "treasury.admin",
+                "account": "Treasury"
+              }
+            ]
+          }
+        },
+        {
+          "name": "allowance",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  108,
+                  108,
+                  111,
+                  119
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "treasury"
+              },
+              {
+                "kind": "account",
+                "path": "user"
+              },
+              {
+                "kind": "arg",
+                "path": "agent_authority"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "agent_authority",
+          "type": "pubkey"
+        },
+        {
+          "name": "cap",
+          "type": "u64"
+        },
+        {
+          "name": "expires_at",
+          "type": "i64"
+        },
+        {
+          "name": "policy_version_hash",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "charge",
+      "docs": [
+        "Debits `amount` from the user's balance against the signing agent's allowance.",
+        "",
+        "Composed in the same transaction as the Lath `log_event*` that this cost is for",
+        "(design §3.3). Both bounds are enforced: the allowance cap (what the *user* authorised",
+        "this agent to spend) and the spendable balance (what the user actually has)."
+      ],
+      "discriminator": [
+        26,
+        55,
+        197,
+        209,
+        93,
+        77,
+        242,
+        15
+      ],
+      "accounts": [
+        {
+          "name": "agent_authority",
+          "signer": true
+        },
+        {
+          "name": "user",
+          "docs": [
+            "Both PDAs are derived from this key, so a substituted `user` derives different PDAs",
+            "and fails the seeds constraint."
+          ],
+          "relations": [
+            "balance",
+            "allowance"
+          ]
+        },
+        {
+          "name": "treasury",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  116,
+                  114,
+                  101,
+                  97,
+                  115,
+                  117,
+                  114,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "treasury.admin",
+                "account": "Treasury"
+              }
+            ]
+          }
+        },
+        {
+          "name": "balance",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  97,
+                  108,
+                  97,
+                  110,
+                  99,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "treasury"
+              },
+              {
+                "kind": "account",
+                "path": "user"
+              }
+            ]
+          }
+        },
+        {
+          "name": "allowance",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  108,
+                  108,
+                  111,
+                  119
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "treasury"
+              },
+              {
+                "kind": "account",
+                "path": "user"
+              },
+              {
+                "kind": "account",
+                "path": "agent_authority"
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "deposit",
+      "docs": [
+        "Moves USDC from the user's token account into the vault and credits their balance."
+      ],
+      "discriminator": [
+        242,
+        35,
+        198,
+        137,
+        82,
+        225,
+        242,
+        182
+      ],
+      "accounts": [
+        {
+          "name": "user",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "treasury",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  116,
+                  114,
+                  101,
+                  97,
+                  115,
+                  117,
+                  114,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "treasury.admin",
+                "account": "Treasury"
+              }
+            ]
+          }
+        },
+        {
+          "name": "balance",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  97,
+                  108,
+                  97,
+                  110,
+                  99,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "treasury"
+              },
+              {
+                "kind": "account",
+                "path": "user"
+              }
+            ]
+          }
+        },
+        {
+          "name": "usdc_mint",
+          "writable": true
+        },
+        {
+          "name": "user_token",
+          "writable": true
+        },
+        {
+          "name": "vault",
+          "writable": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "init_treasury",
+      "docs": [
+        "Creates this admin's treasury (`[\"treasury\", admin]`) and its vault token account",
+        "(`[\"vault\", treasury]`). Once per admin, not once per deployment — see `TREASURY_SEED`."
+      ],
+      "discriminator": [
+        105,
+        152,
+        173,
+        51,
+        158,
+        151,
+        49,
+        14
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "treasury",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  116,
+                  114,
+                  101,
+                  97,
+                  115,
+                  117,
+                  114,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "admin"
+              }
+            ]
+          }
+        },
+        {
+          "name": "usdc_mint"
+        },
+        {
+          "name": "vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "treasury"
+              }
+            ]
+          }
+        },
+        {
+          "name": "sweep_destination"
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "sweeper",
+          "type": "pubkey"
+        },
+        {
+          "name": "max_sweep_per_call",
+          "type": "u64"
+        },
+        {
+          "name": "max_sweep_per_day",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "migrate_allowance",
+      "docs": [
+        "Grows an older grant, written without `Allowance.reserved`, to the current layout.",
+        "",
+        "`reserved` is the account's last field. Anchor deserialises an account's bytes exactly, so",
+        "a grant written without it is eight bytes short and *every* instruction that",
+        "takes it as an `Allowance` — `charge` and `revoke_agent` included — fails with",
+        "`AccountDidNotDeserialize` (3003) until those bytes exist. This is the one instruction",
+        "that reads such an account as raw bytes: it checks the owner, the discriminator and the",
+        "PDA seeds itself, then appends eight zero bytes — a hold of zero. Nothing else about the",
+        "grant changes, and no grant is bricked by the field.",
+        "",
+        "Any signer may pay the ~0.00006 SOL of extra rent, so an agent authority can repair the",
+        "grant it is about to charge without a round trip to the user's wallet. Paying for eight",
+        "zero bytes on a PDA that is already the user's grants nobody anything."
+      ],
+      "discriminator": [
+        103,
+        232,
+        37,
+        3,
+        117,
+        13,
+        2,
+        174
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "docs": [
+            "Pays for eight more bytes of rent. Any signer will do — see `migrate_allowance`."
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "user",
+          "docs": [
+            "`user` derives a different allowance address and fails the seeds constraint."
+          ]
+        },
+        {
+          "name": "treasury",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  116,
+                  114,
+                  101,
+                  97,
+                  115,
+                  117,
+                  114,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "treasury.admin",
+                "account": "Treasury"
+              }
+            ]
+          }
+        },
+        {
+          "name": "allowance",
+          "docs": [
+            "instruction body."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  108,
+                  108,
+                  111,
+                  119
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "treasury"
+              },
+              {
+                "kind": "account",
+                "path": "user"
+              },
+              {
+                "kind": "arg",
+                "path": "agent_authority"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "agent_authority",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "release",
+      "docs": [
+        "Releases a hold taken by `reserve`. **Either** the agent that placed it or the user whose",
+        "money it is may sign, and the two are bounded differently on purpose.",
+        "",
+        "An agent may only give back what its own grant holds (`Allowance.reserved`): the",
+        "balance-level scalar is shared by every agent the user approved, so an agent bounded by",
+        "that alone could release — and so free for its own spending — a hold another agent placed.",
+        "",
+        "The user is bounded by the balance instead. It is their money, the worst they can do is",
+        "unwind their own agents' sessions, and it is the only recovery that reaches a hold taken",
+        "by a **previous deploy**, when grants did not record holds at all. Saturating the grant's",
+        "own number there is deliberate: the scalar is the real bound, and an owner's unwind must",
+        "not fail because the two disagree.",
+        "",
+        "Neither path checks expiry. A hold that outlived its grant is the one that most needs",
+        "returning."
+      ],
+      "discriminator": [
+        253,
+        249,
+        15,
+        206,
+        28,
+        127,
+        193,
+        241
+      ],
+      "accounts": [
+        {
+          "name": "signer",
+          "signer": true
+        },
+        {
+          "name": "user",
+          "docs": [
+            "derived from this key, so a substituted `user` derives different PDAs and fails."
+          ],
+          "relations": [
+            "balance",
+            "allowance"
+          ]
+        },
+        {
+          "name": "agent_authority",
+          "docs": [
+            "allowance PDA, so it cannot name one grant and unwind another."
+          ]
+        },
+        {
+          "name": "treasury",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  116,
+                  114,
+                  101,
+                  97,
+                  115,
+                  117,
+                  114,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "treasury.admin",
+                "account": "Treasury"
+              }
+            ]
+          }
+        },
+        {
+          "name": "balance",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  97,
+                  108,
+                  97,
+                  110,
+                  99,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "treasury"
+              },
+              {
+                "kind": "account",
+                "path": "user"
+              }
+            ]
+          }
+        },
+        {
+          "name": "allowance",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  108,
+                  108,
+                  111,
+                  119
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "treasury"
+              },
+              {
+                "kind": "account",
+                "path": "user"
+              },
+              {
+                "kind": "account",
+                "path": "agent_authority"
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "reserve",
+      "docs": [
+        "Holds `amount` of the user's balance for this agent's session, so two agents running",
+        "concurrently against the same balance cannot both pass the `charge` check on funds",
+        "only one of them can have. A hold is not a debit — `release` returns it untouched."
+      ],
+      "discriminator": [
+        92,
+        99,
+        244,
+        209,
+        28,
+        65,
+        213,
+        157
+      ],
+      "accounts": [
+        {
+          "name": "agent_authority",
+          "signer": true
+        },
+        {
+          "name": "user",
+          "docs": [
+            "Both PDAs are derived from this key, so a substituted `user` derives different PDAs",
+            "and fails the seeds constraint."
+          ],
+          "relations": [
+            "balance",
+            "allowance"
+          ]
+        },
+        {
+          "name": "treasury",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  116,
+                  114,
+                  101,
+                  97,
+                  115,
+                  117,
+                  114,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "treasury.admin",
+                "account": "Treasury"
+              }
+            ]
+          }
+        },
+        {
+          "name": "balance",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  97,
+                  108,
+                  97,
+                  110,
+                  99,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "treasury"
+              },
+              {
+                "kind": "account",
+                "path": "user"
+              }
+            ]
+          }
+        },
+        {
+          "name": "allowance",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  108,
+                  108,
+                  111,
+                  119
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "treasury"
+              },
+              {
+                "kind": "account",
+                "path": "user"
+              },
+              {
+                "kind": "account",
+                "path": "agent_authority"
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "revoke_agent",
+      "docs": [
+        "Revokes a grant by closing the account; rent returns to the user. Already-charged",
+        "amounts stand — revocation stops future charges, it does not refund past ones.",
+        "",
+        "An **outstanding hold is released first**. Closing the allowance is what would make a hold",
+        "unrecoverable — `release` needs the grant's PDA, and a closed PDA cannot be reopened with",
+        "its `reserved` intact — so a crashed agent that never released would otherwise take that",
+        "much of the user's balance out of circulation for good. Revocation is the user's unwind,",
+        "so it has to do the unwinding."
+      ],
+      "discriminator": [
+        227,
+        60,
+        209,
+        125,
+        240,
+        117,
+        163,
+        73
+      ],
+      "accounts": [
+        {
+          "name": "user",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "balance",
+            "allowance"
+          ]
+        },
+        {
+          "name": "treasury",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  116,
+                  114,
+                  101,
+                  97,
+                  115,
+                  117,
+                  114,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "treasury.admin",
+                "account": "Treasury"
+              }
+            ]
+          }
+        },
+        {
+          "name": "balance",
+          "docs": [
+            "Optional, because a user can grant an allowance before ever depositing and must still be",
+            "able to revoke it. When the grant holds nothing there is nothing to give back; when it",
+            "holds something the balance row necessarily exists (a hold cannot be placed without one),",
+            "and omitting it then fails with `BalanceRequired` rather than closing over the hold."
+          ],
+          "writable": true,
+          "optional": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  97,
+                  108,
+                  97,
+                  110,
+                  99,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "treasury"
+              },
+              {
+                "kind": "account",
+                "path": "user"
+              }
+            ]
+          }
+        },
+        {
+          "name": "allowance",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  108,
+                  108,
+                  111,
+                  119
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "treasury"
+              },
+              {
+                "kind": "account",
+                "path": "user"
+              },
+              {
+                "kind": "arg",
+                "path": "agent_authority"
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "agent_authority",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "set_sweeper",
+      "docs": [
+        "Replaces the sweeper key and its caps. Admin only — the sweeper is a hot key, so",
+        "rotating it and tightening its caps must not require redeploying."
+      ],
+      "discriminator": [
+        245,
+        76,
+        133,
+        44,
+        104,
+        184,
+        62,
+        17
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "signer": true,
+          "relations": [
+            "treasury"
+          ]
+        },
+        {
+          "name": "treasury",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  116,
+                  114,
+                  101,
+                  97,
+                  115,
+                  117,
+                  114,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "admin"
+              }
+            ]
+          }
+        },
+        {
+          "name": "sweep_destination"
+        }
+      ],
+      "args": [
+        {
+          "name": "sweeper",
+          "type": "pubkey"
+        },
+        {
+          "name": "max_sweep_per_call",
+          "type": "u64"
+        },
+        {
+          "name": "max_sweep_per_day",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "sweep",
+      "docs": [
+        "Moves already-metered USDC from the vault to the provider's deposit account.",
+        "",
+        "Three bounds, because the sweeper key is hot and provider credits are not refundable:",
+        "never sweep past what agents have actually charged (`total_swept + amount ≤",
+        "total_spent`), never more than `max_sweep_per_call` at once, and never more than",
+        "`max_sweep_per_day` per fixed window starting at `day_start` — so at most 2 ×",
+        "`max_sweep_per_day` inside any 24 h span, when two windows abut (see `DAY_SECONDS`)."
+      ],
+      "discriminator": [
+        40,
+        23,
+        234,
+        175,
+        14,
+        61,
+        154,
+        177
+      ],
+      "accounts": [
+        {
+          "name": "sweeper",
+          "signer": true
+        },
+        {
+          "name": "treasury",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  116,
+                  114,
+                  101,
+                  97,
+                  115,
+                  117,
+                  114,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "treasury.admin",
+                "account": "Treasury"
+              }
+            ]
+          }
+        },
+        {
+          "name": "usdc_mint",
+          "writable": true
+        },
+        {
+          "name": "vault",
+          "writable": true
+        },
+        {
+          "name": "destination",
+          "docs": [
+            "Pinned to the admin-configured address: a hot sweeper key cannot redirect funds."
+          ],
+          "writable": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    }
+  ],
+  "accounts": [
+    {
+      "name": "Allowance",
+      "discriminator": [
+        144,
+        8,
+        184,
+        213,
+        49,
+        248,
+        73,
+        131
+      ]
+    },
+    {
+      "name": "Treasury",
+      "discriminator": [
+        238,
+        239,
+        123,
+        238,
+        89,
+        1,
+        168,
+        253
+      ]
+    },
+    {
+      "name": "UserBalance",
+      "discriminator": [
+        187,
+        237,
+        208,
+        146,
+        86,
+        132,
+        29,
+        191
+      ]
+    }
+  ],
+  "events": [
+    {
+      "name": "AgentApproved",
+      "discriminator": [
+        129,
+        254,
+        201,
+        207,
+        12,
+        135,
+        34,
+        179
+      ]
+    },
+    {
+      "name": "AgentRevoked",
+      "discriminator": [
+        12,
+        251,
+        249,
+        166,
+        122,
+        83,
+        162,
+        116
+      ]
+    },
+    {
+      "name": "AllowanceMigrated",
+      "discriminator": [
+        16,
+        172,
+        214,
+        114,
+        130,
+        171,
+        230,
+        96
+      ]
+    },
+    {
+      "name": "Charged",
+      "discriminator": [
+        167,
+        170,
+        67,
+        179,
+        47,
+        88,
+        221,
+        132
+      ]
+    },
+    {
+      "name": "Deposited",
+      "discriminator": [
+        111,
+        141,
+        26,
+        45,
+        161,
+        35,
+        100,
+        57
+      ]
+    },
+    {
+      "name": "Released",
+      "discriminator": [
+        232,
+        229,
+        255,
+        136,
+        101,
+        189,
+        15,
+        220
+      ]
+    },
+    {
+      "name": "Reserved",
+      "discriminator": [
+        113,
+        14,
+        94,
+        126,
+        13,
+        203,
+        14,
+        65
+      ]
+    },
+    {
+      "name": "Settled",
+      "discriminator": [
+        232,
+        210,
+        40,
+        17,
+        142,
+        124,
+        145,
+        238
+      ]
+    },
+    {
+      "name": "Swept",
+      "discriminator": [
+        254,
+        138,
+        9,
+        198,
+        192,
+        61,
+        165,
+        135
+      ]
+    },
+    {
+      "name": "TreasuryInitialised",
+      "discriminator": [
+        81,
+        16,
+        135,
+        119,
+        118,
+        7,
+        59,
+        39
+      ]
+    },
+    {
+      "name": "Withdrawn",
+      "discriminator": [
+        20,
+        89,
+        223,
+        198,
+        194,
+        124,
+        219,
+        13
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "code": 6000,
+      "name": "Unauthorized",
+      "msg": "Signer is not authorised for this account"
+    },
+    {
+      "code": 6001,
+      "name": "ZeroAmount",
+      "msg": "Amount must be greater than zero"
+    },
+    {
+      "code": 6002,
+      "name": "Overflow",
+      "msg": "Arithmetic overflow"
+    },
+    {
+      "code": 6003,
+      "name": "AllowanceExpired",
+      "msg": "Allowance has expired"
+    },
+    {
+      "code": 6004,
+      "name": "AllowanceCapExceeded",
+      "msg": "Charge would exceed the allowance cap"
+    },
+    {
+      "code": 6005,
+      "name": "InsufficientBalance",
+      "msg": "Insufficient spendable balance (deposited - spent - reserved)"
+    },
+    {
+      "code": 6006,
+      "name": "NothingReserved",
+      "msg": "Nothing reserved to release under this allowance"
+    },
+    {
+      "code": 6007,
+      "name": "BalanceRequired",
+      "msg": "This grant holds funds; pass the user's balance account so they can be returned"
+    },
+    {
+      "code": 6008,
+      "name": "AllowanceNotOutdated",
+      "msg": "Allowance already carries the current layout"
+    },
+    {
+      "code": 6009,
+      "name": "SweepExceedsSpent",
+      "msg": "Sweep would exceed total metered spend"
+    },
+    {
+      "code": 6010,
+      "name": "SweepCapExceeded",
+      "msg": "Sweep exceeds the per-call cap"
+    },
+    {
+      "code": 6011,
+      "name": "DailySweepCapExceeded",
+      "msg": "Sweep exceeds the per-day cap"
+    },
+    {
+      "code": 6012,
+      "name": "WrongMint",
+      "msg": "Token account or mint does not match the treasury"
+    },
+    {
+      "code": 6013,
+      "name": "WrongVault",
+      "msg": "Vault account does not match the treasury"
+    },
+    {
+      "code": 6014,
+      "name": "WrongDestination",
+      "msg": "Sweep destination does not match the treasury"
+    }
+  ],
+  "types": [
+    {
+      "name": "AgentApproved",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "user",
+            "type": "pubkey"
+          },
+          {
+            "name": "agent_authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "cap",
+            "type": "u64"
+          },
+          {
+            "name": "expires_at",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "AgentRevoked",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "user",
+            "type": "pubkey"
+          },
+          {
+            "name": "agent_authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "spent",
+            "type": "u64"
+          },
+          {
+            "name": "released",
+            "docs": [
+              "Outstanding hold handed back to the user by the revocation; 0 for the usual case."
+            ],
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Allowance",
+      "docs": [
+        "One capability grant: this user lets this agent authority spend up to `cap`, until",
+        "`expires_at`, under the policy committed by `policy_version_hash`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "user",
+            "type": "pubkey"
+          },
+          {
+            "name": "agent_authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "cap",
+            "type": "u64"
+          },
+          {
+            "name": "spent",
+            "type": "u64"
+          },
+          {
+            "name": "expires_at",
+            "type": "i64"
+          },
+          {
+            "name": "policy_version_hash",
+            "docs": [
+              "The runtime policy this grant is scoped to (`sha256(canonical {model, temperature,",
+              "toolAllowList, maxCost})`). Advisory on-chain: the program cannot see what the agent",
+              "ran, but the genesis event's `policy_version_hash` must match for the pair to audit."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "reserved",
+            "docs": [
+              "Held by this agent's live sessions and not yet settled or released. Deliberately after",
+              "`bump`: every offset above it is ABI (Photon and `getProgramAccounts` read them by",
+              "`memcmp`), so the field goes at the end. Older grants without it are eight bytes short and",
+              "are grown, in place and to a hold of zero, by `migrate_allowance`."
+            ],
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "AllowanceMigrated",
+      "docs": [
+        "One older grant grown to the layout that carries `reserved`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "user",
+            "type": "pubkey"
+          },
+          {
+            "name": "agent_authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "size",
+            "docs": [
+              "The account's new size in bytes, discriminator included."
+            ],
+            "type": "u16"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Charged",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "user",
+            "type": "pubkey"
+          },
+          {
+            "name": "agent_authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "spent",
+            "type": "u64"
+          },
+          {
+            "name": "allowance_spent",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Deposited",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "user",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "deposited",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Released",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "user",
+            "type": "pubkey"
+          },
+          {
+            "name": "agent_authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "reserved",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Reserved",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "user",
+            "type": "pubkey"
+          },
+          {
+            "name": "agent_authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "reserved",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Settled",
+      "docs": [
+        "One payment by an older `settle` instruction, which this program does not have.",
+        "Kept so those events decode."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "user",
+            "type": "pubkey"
+          },
+          {
+            "name": "provider",
+            "type": "pubkey"
+          },
+          {
+            "name": "agent_authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Swept",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "total_swept",
+            "type": "u64"
+          },
+          {
+            "name": "total_spent",
+            "type": "u64"
+          },
+          {
+            "name": "destination",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Treasury",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "usdc_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "vault",
+            "docs": [
+              "Vault token account (PDA at `[\"vault\", treasury]`, authority = this treasury PDA)."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "sweep_destination",
+            "docs": [
+              "Token account `sweep` is allowed to send to (the provider's deposit address)."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "sweeper",
+            "docs": [
+              "The only key allowed to call `sweep`."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "total_deposited",
+            "type": "u64"
+          },
+          {
+            "name": "total_spent",
+            "docs": [
+              "Lifetime metered spend. The ceiling on `total_swept`."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "total_swept",
+            "type": "u64"
+          },
+          {
+            "name": "max_sweep_per_call",
+            "docs": [
+              "0 = unlimited."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "max_sweep_per_day",
+            "docs": [
+              "0 = unlimited. Enforced per fixed window starting at `day_start` (see `DAY_SECONDS`)."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "swept_today",
+            "type": "u64"
+          },
+          {
+            "name": "day_start",
+            "type": "i64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "vault_bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "TreasuryInitialised",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "usdc_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "sweeper",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "UserBalance",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "user",
+            "type": "pubkey"
+          },
+          {
+            "name": "deposited",
+            "docs": [
+              "Lifetime deposits, less any withdrawal an older account recorded; the vault is deposit-only."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "spent",
+            "docs": [
+              "Lifetime metered spend."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "reserved",
+            "docs": [
+              "Currently held by running sessions."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "nonce",
+            "docs": [
+              "Incremented on every charge; lets a client detect a concurrent debit."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Withdrawn",
+      "docs": [
+        "Unspent USDC returned by an older `withdraw` instruction, which this program does not have.",
+        "Kept so those events decode."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "user",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "deposited",
+            "type": "u64"
+          }
+        ]
+      }
+    }
+  ]
+}

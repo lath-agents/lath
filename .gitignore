@@ -1,0 +1,50 @@
+.anchor
+.DS_Store
+target
+**/*.rs.bk
+node_modules
+test-ledger
+.yarn
+dist
+.env
+# Every env file, not just `.env`: `.env.local`, `.env.devnet` and the seeder's `.env.devnet.e2e` carry
+# RPC keys and the E2E wallet's secret, and only the committed example is a template.
+# Same for a stray CLI keypair, a `.key` file and every trace dir.
+.env*
+!.env.example
+.traces*
+id.json
+*.key
+sdk/dist
+.lath-traces
+# Run output of the loop specs (LATH_TRACE_DIR default) and Playwright at the root.
+/.traces
+/test-results
+*.tgz
+sdk/node_modules
+.surfpool
+
+# Worker scratch space: run logs and throwaway scripts, never part of a commit.
+scratchpad
+
+# The evidence page `npm run -s evidence` writes by default (scripts/evidence): a run's page, copied to the
+# website by hand, never committed.
+/evidence-out/
+
+# Screenshots a manual check drops at the root. Same reasoning as frontend/.walk-*.
+/shots
+
+# Tempo dev treasury (mainnet USDC.e, ≤ $10); never committed
+.tempo-treasury.key
+# The Tempo access-key probe's throwaway root; it can hold funds mid-run
+.tempo-access-key-probe.key
+# A backup ZK-compression RPC url, kept locally; it carries an API key.
+.rpc-backup-url
+frontend/test-results*/
+
+# The console's server keypair (frontend/.gitignore has the same line) and Python bytecode.
+.runtime-keypair.json
+__pycache__/
+
+# Editor settings.
+/.vscode/

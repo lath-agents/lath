@@ -1,0 +1,290 @@
+From c1860fab57e5082c75fc7fa0e576d6529c8ab9bf Mon Sep 17 00:00:00 2001
+From: Lath <lath.solana@gmail.com>
+Date: Thu, 24 Sep 2026 16:04:22 -0300
+Subject: [PATCH] runtime: ZEROCLAW_NOW and ZEROCLAW_OMIT_HOST for reproducible
+ provider requests
+
+---
+ crates/zeroclaw-runtime/src/agent/agent.rs    |   2 +-
+ crates/zeroclaw-runtime/src/agent/clock.rs    | 101 ++++++++++++++++++
+ crates/zeroclaw-runtime/src/agent/loop_.rs    |   6 +-
+ crates/zeroclaw-runtime/src/agent/mod.rs      |   1 +
+ crates/zeroclaw-runtime/src/agent/prompt.rs   |  26 ++---
+ .../src/agent/system_prompt.rs                |  22 ++--
+ 6 files changed, 131 insertions(+), 27 deletions(-)
+ create mode 100644 crates/zeroclaw-runtime/src/agent/clock.rs
+
+diff --git a/crates/zeroclaw-runtime/src/agent/agent.rs b/crates/zeroclaw-runtime/src/agent/agent.rs
+index ca93dce..bb7725b 100644
+--- a/crates/zeroclaw-runtime/src/agent/agent.rs
++++ b/crates/zeroclaw-runtime/src/agent/agent.rs
+@@ -1190,7 +1190,7 @@ impl Agent {
+             return provider();
+         }
+ 
+-        chrono::Local::now()
++        crate::agent::clock::now()
+     }
+ 
+     /// Prefixes a user message with the current date/time in the labeled
+diff --git a/crates/zeroclaw-runtime/src/agent/clock.rs b/crates/zeroclaw-runtime/src/agent/clock.rs
+new file mode 100644
+index 0000000..821190d
+--- /dev/null
++++ b/crates/zeroclaw-runtime/src/agent/clock.rs
+@@ -0,0 +1,101 @@
++//! The runtime's notion of "now", and whether host facts reach the prompt.
++//!
++//! Every date or time the agent loop writes into a provider request goes
++//! through [`now`], so a host that needs byte-reproducible requests —
++//! replaying a recorded session, snapshot-testing a prompt, comparing eval
++//! runs across machines and days — can pin it with `ZEROCLAW_NOW`, an RFC 3339
++//! instant. Unset, it is the local clock, exactly as before.
++//!
++//! `ZEROCLAW_OMIT_HOST=1` leaves the hostname and OS out of the `## Runtime`
++//! section for the same reason: they are facts about the machine, not the
++//! session, and they differ between the run and its replay.
++//!
++//! Both are read from the environment rather than the config schema because
++//! they describe one invocation, not a deployment. Their uppercase names keep
++//! them out of the `ZEROCLAW_<lowercase>` config-override walker.
++
++use chrono::{DateTime, Local};
++use std::sync::OnceLock;
++
++/// Env var holding an RFC 3339 instant to use instead of the local clock.
++pub const NOW_ENV: &str = "ZEROCLAW_NOW";
++
++/// Env var that, set to `1` or `true`, omits hostname and OS from the prompt.
++pub const OMIT_HOST_ENV: &str = "ZEROCLAW_OMIT_HOST";
++
++/// The instant the runtime should treat as now.
++///
++/// The pinned value is read once per process: a run is one invocation, and
++/// re-reading the environment on every call would let a mid-run change split
++/// one session across two clocks. The result is rendered in the local time
++/// zone, so a caller that wants the offset pinned too sets `TZ`.
++pub fn now() -> DateTime<Local> {
++    static FIXED: OnceLock<Option<DateTime<Local>>> = OnceLock::new();
++    FIXED
++        .get_or_init(|| {
++            let raw = std::env::var(NOW_ENV).ok()?;
++            let parsed = parse_fixed(&raw);
++            if parsed.is_none() {
++                // A value that does not parse is a misconfiguration, not a
++                // request for the wall clock; say so rather than silently
++                // producing a run that cannot be reproduced.
++                eprintln!(
++                    "warning: {NOW_ENV}={raw:?} is not an RFC 3339 instant; using the local clock"
++                );
++            }
++            parsed
++        })
++        .unwrap_or_else(Local::now)
++}
++
++/// Whether the hostname and OS should be left out of the prompt.
++pub fn omit_host() -> bool {
++    std::env::var(OMIT_HOST_ENV).is_ok_and(|v| is_truthy(&v))
++}
++
++fn parse_fixed(raw: &str) -> Option<DateTime<Local>> {
++    DateTime::parse_from_rfc3339(raw.trim())
++        .ok()
++        .map(|t| t.with_timezone(&Local))
++}
++
++fn is_truthy(raw: &str) -> bool {
++    matches!(
++        raw.trim().to_ascii_lowercase().as_str(),
++        "1" | "true" | "yes"
++    )
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn parses_an_rfc3339_instant() {
++        let t = parse_fixed("2026-09-24T12:00:00Z").expect("parses");
++        assert_eq!(t.timestamp(), 1_790_251_200);
++    }
++
++    #[test]
++    fn parses_with_an_offset_and_surrounding_space() {
++        let t = parse_fixed(" 2026-09-24T09:00:00-03:00 ").expect("parses");
++        assert_eq!(t.timestamp(), 1_790_251_200);
++    }
++
++    #[test]
++    fn rejects_what_is_not_rfc3339() {
++        assert!(parse_fixed("").is_none());
++        assert!(parse_fixed("2026-09-24").is_none());
++        assert!(parse_fixed("yesterday").is_none());
++    }
++
++    #[test]
++    fn truthy_values() {
++        for v in ["1", "true", "TRUE", " yes "] {
++            assert!(is_truthy(v), "{v:?}");
++        }
++        for v in ["", "0", "false", "no", "2"] {
++            assert!(!is_truthy(v), "{v:?}");
++        }
++    }
++}
+diff --git a/crates/zeroclaw-runtime/src/agent/loop_.rs b/crates/zeroclaw-runtime/src/agent/loop_.rs
+index 48e1203..53f6879 100644
+--- a/crates/zeroclaw-runtime/src/agent/loop_.rs
++++ b/crates/zeroclaw-runtime/src/agent/loop_.rs
+@@ -1930,7 +1930,7 @@ pub async fn run(
+                 })
+                 .unwrap_or_default();
+             let context = hw_context;
+-            let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
++            let now = crate::agent::clock::now().format("%Y-%m-%d %H:%M:%S %Z");
+             let enriched = if context.is_empty() {
+                 format!("[{now}] {effective_msg}")
+             } else {
+@@ -2470,7 +2470,7 @@ pub async fn run(
+                     })
+                     .unwrap_or_default();
+                 let context = hw_context;
+-                let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
++                let now = crate::agent::clock::now().format("%Y-%m-%d %H:%M:%S %Z");
+                 let enriched = if context.is_empty() {
+                     format!("[{now}] {effective_input}")
+                 } else {
+@@ -3429,7 +3429,7 @@ pub(crate) async fn process_message_shared(
+             })
+             .unwrap_or_default();
+         let context = hw_context;
+-        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
++        let now = crate::agent::clock::now().format("%Y-%m-%d %H:%M:%S %Z");
+         let enriched = if context.is_empty() {
+             format!("[{now}] {effective_message}")
+         } else {
+diff --git a/crates/zeroclaw-runtime/src/agent/mod.rs b/crates/zeroclaw-runtime/src/agent/mod.rs
+index 103e7b4..0f369f6 100644
+--- a/crates/zeroclaw-runtime/src/agent/mod.rs
++++ b/crates/zeroclaw-runtime/src/agent/mod.rs
+@@ -2,6 +2,7 @@
+ pub mod agent;
+ pub(crate) mod approval_bridge;
+ pub mod classifier;
++pub mod clock;
+ pub mod context_analyzer;
+ pub mod cost;
+ pub mod dispatcher;
+diff --git a/crates/zeroclaw-runtime/src/agent/prompt.rs b/crates/zeroclaw-runtime/src/agent/prompt.rs
+index 885935c..0310cb4 100644
+--- a/crates/zeroclaw-runtime/src/agent/prompt.rs
++++ b/crates/zeroclaw-runtime/src/agent/prompt.rs
+@@ -4,7 +4,7 @@ use crate::security::AutonomyLevel;
+ use crate::skills::Skill;
+ use crate::tools::Tool;
+ use anyhow::Result;
+-use chrono::{Datelike, Local};
++use chrono::Datelike;
+ use std::fmt::Write;
+ use std::path::Path;
+ use zeroclaw_config::schema::IdentityConfig;
+@@ -508,23 +508,23 @@ impl PromptSection for RuntimeSection {
+     }
+ 
+     fn build(&self, ctx: &PromptContext<'_>) -> Result<String> {
+-        let host =
+-            hostname::get().map_or_else(|_| "unknown".into(), |h| h.to_string_lossy().to_string());
++        // `Host: … | OS: … | ` or nothing, as in `system_prompt` (see `clock`).
++        let host_os = if crate::agent::clock::omit_host() {
++            String::new()
++        } else {
++            let host = hostname::get()
++                .map_or_else(|_| "unknown".into(), |h| h.to_string_lossy().to_string());
++            format!("Host: {host} | OS: {} | ", std::env::consts::OS)
++        };
+         // The shell sits next to the OS because the OS alone does not
+         // determine it: on Windows `cmd.exe` and PowerShell are both
+         // reachable. Omitted for shell-less runtimes.
+         match &ctx.shell_profile {
+             Some(profile) => Ok(format!(
+-                "## Runtime\n\nHost: {host} | OS: {} | Shell: {} | Model: {}",
+-                std::env::consts::OS,
+-                profile.name,
+-                ctx.model_name
+-            )),
+-            None => Ok(format!(
+-                "## Runtime\n\nHost: {host} | OS: {} | Model: {}",
+-                std::env::consts::OS,
+-                ctx.model_name
++                "## Runtime\n\n{host_os}Shell: {} | Model: {}",
++                profile.name, ctx.model_name
+             )),
++            None => Ok(format!("## Runtime\n\n{host_os}Model: {}", ctx.model_name)),
+         }
+     }
+ }
+@@ -557,7 +557,7 @@ impl PromptSection for DateTimeSection {
+     }
+ 
+     fn build(&self, _ctx: &PromptContext<'_>) -> Result<String> {
+-        let now = Local::now();
++        let now = crate::agent::clock::now();
+         // Force Gregorian year to avoid confusion with local calendars (e.g. Buddhist calendar).
+         let (year, month, day) = (now.year(), now.month(), now.day());
+ 
+diff --git a/crates/zeroclaw-runtime/src/agent/system_prompt.rs b/crates/zeroclaw-runtime/src/agent/system_prompt.rs
+index d129ff9..30a79a2 100644
+--- a/crates/zeroclaw-runtime/src/agent/system_prompt.rs
++++ b/crates/zeroclaw-runtime/src/agent/system_prompt.rs
+@@ -491,7 +491,7 @@ pub fn build_system_prompt_with_mode_and_effective_tools(
+     }
+ 
+     // ── 6. Date ─────────────────────────────────────────────────
+-    let now = chrono::Local::now();
++    let now = crate::agent::clock::now();
+     let _ = writeln!(
+         prompt,
+         "## Current Date\n\n{} ({})\n",
+@@ -500,8 +500,15 @@ pub fn build_system_prompt_with_mode_and_effective_tools(
+     );
+ 
+     // ── 7. Runtime ──────────────────────────────────────────────
+-    let host =
+-        hostname::get().map_or_else(|_| "unknown".into(), |h| h.to_string_lossy().to_string());
++    // `Host: … | OS: … | ` or nothing: the host facts describe the machine,
++    // not the session, and `ZEROCLAW_OMIT_HOST` drops them (see `clock`).
++    let host_os = if crate::agent::clock::omit_host() {
++        String::new()
++    } else {
++        let host =
++            hostname::get().map_or_else(|_| "unknown".into(), |h| h.to_string_lossy().to_string());
++        format!("Host: {host} | OS: {} | ", std::env::consts::OS)
++    };
+     // The shell is reported next to the OS because the OS alone does not
+     // determine it: on Windows `cmd.exe` and PowerShell are both reachable.
+     // Omitted entirely for shell-less runtimes, which read no worse than
+@@ -510,17 +517,12 @@ pub fn build_system_prompt_with_mode_and_effective_tools(
+         Some(profile) => {
+             let _ = writeln!(
+                 prompt,
+-                "## Runtime\n\nHost: {host} | OS: {} | Shell: {} | Model: {model_name}\n",
+-                std::env::consts::OS,
++                "## Runtime\n\n{host_os}Shell: {} | Model: {model_name}\n",
+                 profile.name,
+             );
+         }
+         None => {
+-            let _ = writeln!(
+-                prompt,
+-                "## Runtime\n\nHost: {host} | OS: {} | Model: {model_name}\n",
+-                std::env::consts::OS,
+-            );
++            let _ = writeln!(prompt, "## Runtime\n\n{host_os}Model: {model_name}\n");
+         }
+     }
+ 
+-- 
+2.50.1 (Apple Git-155)
+

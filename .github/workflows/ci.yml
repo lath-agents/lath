@@ -1,0 +1,629 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  schedule:
+    # Nightly, 05:00 UTC: the devnet job below. Devnet is a live cluster with a deployed
+    # program on it, so it drifts without anyone touching this repo.
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+    inputs:
+      devnet:
+        description: "Also run the devnet suite (needs LATH_DEVNET_RPC + DEVNET_WALLET)"
+        type: boolean
+        default: false
+
+# The least a job here needs: every job reads this repository and writes nothing back — no
+# release, no comment, no pages, no package — so the token is read-only at the top and no job
+# raises it. Without this block `GITHUB_TOKEN` carries whatever the repository's default is, which
+# for a repository that has not been switched to the read-only default is `contents: write`: a
+# compromised action or transitive dependency would hold a push-capable token for the whole run.
+# Any job that later needs more should grant it in its own `permissions:`, not here.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned toolchain (SPEC §11). Do not bump light-sdk to 0.24 (needs anchor-lang 1.x).
+  ANCHOR_VERSION: 0.31.1
+  SOLANA_VERSION: 3.1.12
+  # The host toolchain the programs and their tests compile on. `dtolnay/rust-toolchain@stable` is
+  # a *branch*, so CI would silently follow whatever upstream released this week while "the pinned
+  # toolchain is load-bearing" is a stated invariant (docs/ARCHITECTURE.md §13). 1.89.0 is the rustc
+  # that solana-cli 3.1.12's platform tools install (`rustup toolchain list` shows it as
+  # `1.89.0-sbpf-solana-v1.52`), so the host compiler matches the one that builds the sBPF
+  # objects. Raise it deliberately, together with SOLANA_VERSION.
+  RUST_VERSION: 1.89.0
+  # `avm` itself, pinned by rev — this is the repo's standard. Installing it
+  # off the default branch would mean an unpinned build of the tool that then installs the pinned
+  # ANCHOR_VERSION. This rev is the `v0.31.1` tag of the anchor repository, the same release
+  # ANCHOR_VERSION names.
+  ANCHOR_REV: 47284f8f0b9844c6b83234aa90f556bad00e12ed
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # Pinned by commit, which means the toolchain can no longer be read off the branch name:
+      # name it (see RUST_VERSION above).
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # the `stable` branch at 2026-09-03
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Cache Solana and Anchor toolchains
+        id: cache-toolchain
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.local/share/solana
+            ~/.avm
+            ~/.cargo/bin/anchor
+            ~/.cargo/bin/avm
+          key: toolchain-${{ runner.os }}-solana${{ env.SOLANA_VERSION }}-anchor${{ env.ANCHOR_VERSION }}
+
+      - name: Install Solana CLI
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: sh -c "$(curl -sSfL https://release.anza.xyz/v${SOLANA_VERSION}/install)"
+
+      - name: Install Anchor CLI
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: |
+          cargo install --git https://github.com/coral-xyz/anchor --rev "$ANCHOR_REV" avm --locked --force
+          avm install "$ANCHOR_VERSION"
+          avm use "$ANCHOR_VERSION"
+
+      - name: Add toolchains to PATH
+        run: |
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Toolchain versions
+        run: |
+          solana --version
+          anchor --version
+          cargo --version
+
+      - run: npm ci
+
+      - name: Keypair for the program id
+        run: |
+          mkdir -p target/deploy
+          solana-keygen new --no-bip39-passphrase -s -o "$HOME/.config/solana/id.json"
+
+      # anchor 0.31 rewrites `declare_id!` and Anchor.toml to the keypairs in target/deploy, and a
+      # fresh runner has none, so it generates random ones and the IDL would carry their addresses.
+      # Put the source back as committed, then rebuild the IDL from it, so the checks below hold the
+      # deployed ids.
+      - name: anchor build
+        run: |
+          anchor build
+          git checkout -- Anchor.toml programs/lath/src/lib.rs programs/lath-billing/src/lib.rs
+          anchor idl build -p lath -o target/idl/lath.json -t target/types/lath.ts
+          anchor idl build -p lath_billing -o target/idl/lath_billing.json -t target/types/lath_billing.ts
+
+      # The deployed ids are what every chain on devnet is written under, so the check is that the
+      # source still declares them. It does not read `target/deploy/lath-keypair.json`: the
+      # runner has no program key — `anchor build` generates a fresh one — so such a step could
+      # only fail, and every job after it would never run.
+      - name: Program id matches declare_id
+        run: |
+          for p in lath lath-billing; do
+            key=${p//-/_}
+            expected=$(sed -n "/^\[programs.devnet\]/,/^\[/s/^$key = \"\(.*\)\"/\1/p" Anchor.toml)
+            actual=$(sed -n 's/^declare_id!("\(.*\)");/\1/p' "programs/$p/src/lib.rs")
+            test -n "$expected" && test "$expected" = "$actual" \
+              || { echo "program id drift in $p: declare_id $actual, Anchor.toml $expected"; exit 1; }
+          done
+
+      - name: cargo test
+        run: |
+          cargo test -p lath
+          cargo test -p lath-billing
+
+      - name: bundled IDL is in sync with target/
+        run: npm run sdk:sync:check
+
+      - name: build the publishable SDK
+        run: npm run sdk:build
+
+      # The runtime is the second workspace package the app imports (`@lath/runtime`). Unbuilt
+      # here, its `strict` errors and a broken `dist/` would surface only in `next build`, two
+      # jobs away.
+      - name: build the runtime
+        run: npm run runtime:build
+
+      # The console tests import route files (`api/agents/route.ts`, `api/templates/route.ts`, …) that
+      # import `next/server`, which only the frontend's own install provides; without it the root
+      # typecheck cannot resolve them, and the console-* step below could not load them.
+      - run: npm ci --prefix frontend
+
+      - name: typecheck
+        run: npx tsc --noEmit -p ./tsconfig.json
+
+      # Everything that needs neither a chain nor the network. What needs a chain runs against the
+      # deployed programs in the nightly `devnet` job below.
+      - name: unit tests (node only)
+        run: |
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/lath.ts -g 'hash chain vector|trace stores'
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/cells.ts -g 'cell hash chain vector'
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/audit.ts -g 'lath-audit CLI contract'
+          # The lifecycle audit: owner signatures, order, the deploy tx and the private halves; a
+          # chain without lifecycle records prints exactly what it did.
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/audit-lifecycle.ts
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/runtime.ts -g 'runtime policy and metering'
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/spend.ts
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/rollup.ts
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/registry.ts
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/output-tree.ts
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/irys.ts -g 'Irys ids'
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/trace-routing.ts
+          # The writer queue's own logic — the head check, the three states, the locator an epoch
+          # owes — against `tests/fixtures/fake-chain.ts`. It needs no validator, runs in a
+          # second, and covers the rules a console's FAILED badge promises — a charge that disarmed
+          # the head check would reach devnet unseen without it.
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/anchor-queue.ts
+          # A charge the billing program refuses is parked per payer instead of halting a shared
+          # chain, and a charge in doubt is asked about before it is sent again.
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/anchor-parked-charges.ts
+          # A loop step's writes against the same fake chain: the settlement record and the
+          # checkpoint defer behind a journal that owes writes.
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/loop-anchor.ts
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/loop-sandbox-refused.ts
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/loop-storage.ts
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/loop-goal-check.ts
+          # Lifecycle records (sdk/src/lifecycle.ts): the documents, the fold a console's status comes
+          # from, and the reader over a real logger; an old chain reads as nothing recorded.
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/lifecycle.ts
+          # A journaled charge a step or settlement cannot pay stays owed, never "verified" on an
+          # empty signature.
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/loop-charge-drain.ts
+          # verify-step's sandbox block: the replay record, the posture the Genesis commits, the build.
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/verify-step-sandbox.ts
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/sources-irys.ts
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/sources-refresh.ts
+          # An attached file as a source (`text`): written, committed, bound by the start.
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/sources-text.ts
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/runtime-budget.ts
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/openrouter-stream.ts
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/epoch-fallback.ts
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/epoch-reanchor.ts
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/bundle.ts
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/unsealed.ts
+          # The Explore join: every header as a tile, loop-checkpointed and fixture-named rows marked.
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/explore-rows.ts
+          # The workspace: its URL, the /agents, /loops, /market
+          # and /zeroclaw redirects, each run nested under its agent, and which item a URL selects.
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/workspace.ts
+          # A tempo-key stop drawn neutral, and Run again on stopped runs only.
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/loop-status-neutral.ts
+          # The agent store: its entries, an owner's signed write, its tools.
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/agent-store.ts
+          # The allowance card sends no grant until the allowance read has settled, and
+          # the web tools refuse every address safe-fetch refuses.
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/allowance-grant.ts
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/web-tools-ssrf.ts
+          # The tempo rail, network-free: the key derivation vector, the transport over a fake
+          # session and a recorded gateway body, the verifier over a fake chain and reader.
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/tempo-key.ts
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/tempo-inference.ts
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/tempo-verify.ts
+          # verify-charge: a charge against its Tempo transaction, a carry paired with its step,
+          # and a keyed loop's memo, over a fake chain and recorded transactions.
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/tempo-verify-charge.ts
+          # The treasury lock and the ledger recovery over files in a throwaway directory.
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/tempo-ledger.ts
+          # The treasury's Tempo figures (tempo:stats): feed rows sorted and summed over fixtures.
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/tempo-stats.ts
+          # The Tempo screens' client libraries: a close's
+          # payee and amount decoded as the browser decodes them, held to the SDK's decoder over a
+          # recorded mainnet close; the check-it-yourself commands run through bash and the CLI's flag
+          # rules; the /api/tempo/stats hook; and the loop page's money flow, open channel, Tempo
+          # payments and treasury series from fixture rows. No Tempo request is made.
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/tempo-close.ts
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/tempo-commands.ts
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/tempo-stats-hook.ts
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/loop-money-flow.ts
+          # Tempo storage and the paid RPC session (docs/ARCHITECTURE.md §7.4): the charge
+          # transport and queue over a fake gateway, and the snapshot each leaf's reads produce,
+          # carried by the next leaf. The mppx session is a fake; no Tempo transaction is made.
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/tempo-storage.ts
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/tempo-snapshot.ts
+          # Per-loop Tempo access keys over a throwaway key directory: the file before the authorize,
+          # mode 0600, never under LATH_TRACE_DIR, the reconcile's target from fixture rows.
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/tempo-keys.ts
+          # A loop's key from start to stop over a fake Tempo: authorize last, reconcile before each
+          # open, close then revoke, and the page's cap line (docs/ARCHITECTURE.md §7.3).
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/loop-tempo-key.ts
+          # Protocol plugins, network-free. `squads.pay` and `sas.attest` are on the roadmap; what is
+          # tested is the step row's text and SAS's hand-built instructions against a probe's golden
+          # bytes, which the loop receipt publishes with. `console-plugins` runs in the console-* glob below.
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/plugin-sas.ts
+          # The loop receipt (docs/ARCHITECTURE.md §8): its bytes, nonce, address, pointer, the
+          # attestation-account decoder, and the policy key that is absent unless a receipt was asked for.
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/sas-receipt.ts
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/audit-receipt.ts
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/plugins-view.ts
+          # The evidence page (`npm run -s evidence`), built from a fixture row and receipt with no RPC:
+          # its links, the words it keeps off screen and the RPC key it never prints.
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/evidence-page.ts
+          # The devnet seed derivation depends on a secret the repo does not hold.
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/seed-keys.ts
+          # A rate-limited state read is retried rather than surfaced.
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/read-retry.ts
+          # A lost confirmation against a fake cluster that lags: a landed write is found, never
+          # sent twice.
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/verify-chain.ts
+          # A header-only LTE2 forgery of goal memory, a decision blob or a storage report does not
+          # satisfy --require-preimages.
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/audit-encrypted-forgery.ts
+          # A Jev call's voucher on a timeout and the loop's Jev spend, and the console's stored gated
+          # rows stopped before they step. Gated loops, Improve and the trace audit are on the roadmap.
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/loop-gate-runtime.ts
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/console-gate.ts
+          # The trace-decryption message, salt and info pinned as hex, so a rename sweep over
+          # `lattice` cannot rewrite them unseen.
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/trace-encryption.ts
+          # The ZeroClaw sandbox every loop step runs in (docs/ARCHITECTURE.md §5): the posture and the
+          # wrapper generated from it, the two sockets, the workspace tree and the replay record,
+          # and `ZeroClawRuntime` over a stub binary. No Lath binary and no bwrap here, so the
+          # real-binary case and the air gap skip, each saying why; the zeroclaw-linux and
+          # zeroclaw-macos jobs below run them with LATH_AIRGAP_REQUIRED=1, where a skip is a failure.
+          # Every tool call held to its declared argument schema, and an undeclared name recorded
+          # as unknown:<name>, for the ReAct loop and the sandbox's host tools alike.
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/tool-args.ts
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/zeroclaw-posture.ts
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/zeroclaw-proxy.ts
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/zeroclaw-workspace.ts
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/zeroclaw-runtime.ts
+          # The host's read of the sandbox-written trace refuses a symlink, a FIFO, a hard link and
+          # an oversize file.
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/zeroclaw-trace-read.ts
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/zeroclaw-airgap.ts
+          # A sandbox's sources: the manifest's pinned vector, and the fetcher
+          # on a stubbed network — every SSRF, redirect, tar-path and cap refusal by its sentence.
+          # `console-sandbox` (the start's fetch and the sandbox config) runs in the console-* glob below.
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/sandbox-sources-manifest.ts
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/sandbox-sources.ts
+          # The loop registry's strict reads and own-property
+          # lookups, Photon paging and a failed anchor's fallback copy, SSE blocks past U+2028, and an
+          # epoch probe that caches only what it read from the program's bytes.
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/loop-registry.ts
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/photon-paging.ts
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/sse-parse.ts
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/capped-fetch.ts
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/epoch-probe.ts
+          npx ts-mocha --paths -p ./tsconfig.json -t 120000 tests/tempo-close-several.ts
+
+      # The console's rules: what a deploy, a clone, a launch, a loop start and a template write
+      # refuse, and what they record. No validator and no devnet — the whole point of keeping
+      # these rules in `frontend/src/app/api/_lib/` rather than in routes that import
+      # `next/server` is that they can be loaded and tested here (`copyContext`,
+      # `planLoopStart`, `useVersionContext`).
+      #
+      # Without this step the only gate on the deploy/launch/loop/template rules would be somebody
+      # remembering to run them by hand.
+      # The glob also takes `console-reader`, the React-free client helpers behind
+      # the header badge, the Tempo close check and the program error copy.
+      # And `console-zeroclaw`: the loop start refused without a working Lath binary,
+      # the sandbox's tool set, a `web.*` tool refused by name.
+      # And `console-plugins`: SAS · receipt's half —
+      # the pointer refused or committed, the receipt built from the row and published once, on Jev's
+      # achieved only — and a grant refused at every door, whatever LATH_PROTOCOL_PLUGINS says, with a
+      # stored row started with grants read, never stepped.
+      # And `console-lifecycle`: the lifecycle records a console owes and writes — a loop's
+      # start before its first step, pause, resume and stop in order and never beside a step or ahead of
+      # its owed checkpoint, the kill switch, the plain and encrypted halves, and the read-only rebuild.
+      # And `console-removed-features`: teams, gated loops, the request and feed triggers,
+      # the trace audit and grants, refused at every door with no switch to turn one back on.
+      # One process per file: the suites share the route modules' in-memory state — rate-limit
+      # buckets, the Tempo treasury read once per process, env read at module load — so in one
+      # process a later suite inherits what an earlier one spent, and passes or fails by file order.
+      - name: console tests (no validator, no devnet)
+        run: |
+          for f in tests/console-*.ts; do
+            echo "::group::$f"
+            npx ts-mocha --paths -p ./tsconfig.json -t 120000 "$f" || exit 1
+            echo "::endgroup::"
+          done
+
+      - name: prettier
+        run: npm run lint
+
+  # The web app builds against the *published* SDK bundle, so this job is also the standing
+  # check that `@lath/sdk/browser` still bundles for a browser — the app's top risk.
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # `tsup` alone, against the committed `sdk/src/idl`: `sdk:build` first runs `sync-idl.mjs`,
+      # which reads `target/idl/`, and this job runs no `anchor build`. That the committed
+      # IDL matches the programs is `build-and-test`'s `sdk:sync:check`.
+      - name: build the SDK the app imports
+        working-directory: sdk
+        run: npx tsup
+
+      # Three ways the browser entry goes wrong. A node builtin breaks it in the browser. viem is ESM
+      # and reaches for no node builtin, so a re-export of `sdk/src/tempo.ts` would ship a whole EVM
+      # client to every page and pass the builtin check; hence its own check. The size ceiling is the
+      # general form of the same question: 620 000 bytes, about 10 % over the entry's 561 111, so
+      # that anything that grows the bundle markedly has to be looked at rather than merged, and the
+      # headroom is not quietly spent. No `@sqds/multisig` either: only `@lath/runtime/plugins`
+      # imports it.
+      - name: no node builtins, no viem, no surprise weight in the browser entry
+        run: |
+          if grep -oE 'require\("(node:)?(fs|path|crypto|os|stream|child_process|net|http|https|zlib|dns)"\)' sdk/dist/browser.js; then
+            echo "the browser entry pulled in a node builtin"; exit 1
+          fi
+          if [ "$(grep -c viem sdk/dist/browser.js)" != "0" ]; then
+            echo "viem reached the browser entry; the Tempo reader belongs in the node entry only"; exit 1
+          fi
+          size=$(wc -c < sdk/dist/browser.js)
+          if [ "$size" -gt 620000 ]; then
+            echo "sdk/dist/browser.js is $size bytes, past the 620000 recorded here"; exit 1
+          fi
+
+      - run: npm ci --prefix frontend
+
+      - name: typecheck
+        run: npm --prefix frontend run typecheck
+
+      - name: next build
+        run: npm --prefix frontend run build
+
+      # The test-only wallet adapter holds a key. It is fenced on three conditions
+      # (frontend/src/lib/e2e-wallet.ts), and because Next inlines NEXT_PUBLIC_* at build time,
+      # a build outside a development run eliminates the adapter as dead code rather than merely disabling
+      # it. This is that claim, checked — with the secret deliberately *set*, which is the case
+      # that would matter if someone leaked one into a deployment environment.
+      - name: the E2E wallet is absent from a production bundle
+        env:
+          NEXT_PUBLIC_CLUSTER: devnet
+          NEXT_PUBLIC_E2E_WALLET_SECRET: "[1,2,3]"
+        run: |
+          npm --prefix frontend run build
+          if grep -rl "E2E Keypair" frontend/.next/static/chunks/; then
+            echo "the test-only wallet adapter survived into a devnet build"; exit 1
+          fi
+
+  # The Lath-patched ZeroClaw every loop step runs in (docs/ARCHITECTURE.md §5): built
+  # from zeroclaw/UPSTREAM plus zeroclaw/patches/ by zeroclaw/build.sh, never downloaded, then held
+  # to its contract and its air gap on the binary itself. The build is cached on the hash of the
+  # four inputs that decide it, so a push that touches none of them reuses the target dir (a cold
+  # build is about six minutes). The job prints the build record, whose sha256 is the Linux row of
+  # `sdk/src/zeroclaw-builds.ts`.
+  zeroclaw-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # The ZeroClaw pin is its own, not RUST_VERSION: the binary is built with what upstream's CI
+      # and release jobs pin, and build.sh runs `cargo +<TOOLCHAIN>`, so read it from the file
+      # rather than repeat it here.
+      - name: Read the ZeroClaw toolchain pin
+        id: zc
+        run: echo "toolchain=$(tr -d '[:space:]' < zeroclaw/TOOLCHAIN)" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # the `stable` branch at 2026-09-03
+        with:
+          toolchain: ${{ steps.zc.outputs.toolchain }}
+          components: rustfmt, clippy
+
+      - name: Cache the ZeroClaw build
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            zeroclaw/.build/src/target
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: zeroclaw-${{ runner.os }}-${{ hashFiles('zeroclaw/UPSTREAM', 'zeroclaw/patches/**', 'zeroclaw/TOOLCHAIN', 'zeroclaw/FEATURES') }}
+          restore-keys: zeroclaw-${{ runner.os }}-
+
+      # bwrap needs unprivileged user namespaces, which Ubuntu 24.04's AppArmor restricts by
+      # default; a deploy box lifts the same sysctl. Without it the wrapper cannot start and every
+      # loop is refused.
+      - name: Install bubblewrap and allow user namespaces
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap
+          bwrap --version
+
+      - name: Build the Lath-patched ZeroClaw (fmt, clippy -D warnings)
+        run: zeroclaw/build.sh --check
+
+      - name: Build record
+        run: cat zeroclaw/.build/zeroclaw.sha256
+
+      # The contract (zeroclaw/CONTRACT.md) on the built binary: every refusal names what it
+      # refused and reaches no model, the stub step completes over both sockets with exactly the
+      # eight tools and an HTTP_PROXY that sees nothing, and the trace is flushed over 50 runs.
+      - name: The binary against its contract
+        run: zeroclaw/probe/lath-binary.sh zeroclaw/.build/zeroclaw
+
+      # Replay on the built binary: the same step twice, every request byte-identical.
+      - name: Byte-reproducible requests
+        run: zeroclaw/probe/replay-bytes.sh zeroclaw/.build/zeroclaw
+
+      - run: npm ci
+
+      # The air gap under the runtime's generated bwrap arguments, and the two-step loop with the
+      # real binary under the real wrapper. LATH_AIRGAP_REQUIRED turns a skip into a failure: this
+      # job exists to run them.
+      - name: The air gap and the sandbox, with the real binary
+        env:
+          LATH_AIRGAP_REQUIRED: "1"
+          LATH_ZEROCLAW_BIN: ${{ github.workspace }}/zeroclaw/.build/zeroclaw
+        run: |
+          npx ts-mocha --paths -p ./tsconfig.json -t 240000 tests/zeroclaw-airgap.ts
+          npx ts-mocha --paths -p ./tsconfig.json -t 240000 tests/zeroclaw-runtime.ts
+
+  # The macOS wrapper is `sandbox-exec`, which Apple has deprecated and a runner image could change,
+  # so the air gap is proven on a macOS runner on every push: the hand-written profile's probe, then
+  # the same probe under the runtime's generated profile. No binary is built here; the std-only probe
+  # (`zeroclaw/probe/airgap-probe.rs`) stands in for it.
+  zeroclaw-macos:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # rustc builds the std-only probe; RUST_VERSION is enough for a file with no dependencies.
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # the `stable` branch at 2026-09-03
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: The air-gap probe under sandbox-exec
+        run: zeroclaw/probe/airgap.sh macos
+
+      - run: npm ci
+
+      - name: The air gap under the generated profile
+        env:
+          LATH_AIRGAP_REQUIRED: "1"
+        run: npx ts-mocha --paths -p ./tsconfig.json -t 240000 tests/zeroclaw-airgap.ts
+
+  # The deployed program on a live cluster, checked nightly. Nothing above touches a chain, so it would not notice devnet drifting — a program
+  # upgrade that never landed, Light's trees moving, Helius changing what Photon serves.
+  #
+  # Needs two repo secrets, and skips itself (rather than failing) when they are absent, so a
+  # fork's scheduled run is quiet:
+  #   LATH_DEVNET_RPC  a ZK-compression devnet RPC that serves Photon and the prover
+  #   DEVNET_WALLET       the funded payer keypair, as the JSON array `solana-keygen` writes
+  # The suite uses a fresh agent id per run and spends a few thousand lamports of fees; keep
+  # an eye on the wallet balance, which the job prints.
+  devnet:
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.devnet)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Check the secrets are configured
+        id: secrets
+        env:
+          RPC: ${{ secrets.LATH_DEVNET_RPC }}
+          WALLET: ${{ secrets.DEVNET_WALLET }}
+        run: |
+          if [ -z "$RPC" ] || [ -z "$WALLET" ]; then
+            echo "LATH_DEVNET_RPC or DEVNET_WALLET is not set — skipping the devnet suite."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Write the payer keypair
+        if: steps.secrets.outputs.ready == 'true'
+        env:
+          WALLET: ${{ secrets.DEVNET_WALLET }}
+        run: |
+          mkdir -p ~/.config/solana
+          printf '%s' "$WALLET" > ~/.config/solana/id.json
+          chmod 600 ~/.config/solana/id.json
+
+      - name: Devnet suite
+        if: steps.secrets.outputs.ready == 'true'
+        env:
+          LATH_DEVNET_RPC: ${{ secrets.LATH_DEVNET_RPC }}
+          ANCHOR_WALLET: /home/runner/.config/solana/id.json
+        run: npm run test:devnet
+
+      # The data-availability check (docs/ARCHITECTURE.md §9): an agent whose epochs and preimage
+      # bundle were anchored to Irys devnet audits VERIFIED with nothing but the chain and the public
+      # gateway — no console, no trace directory. Irys devnet deletes after about sixty days, so
+      # this step goes red about sixty days after the chain in LATH_DA_AGENT was seeded; re-seed and
+      # move the variable, do not "fix" it.
+      - name: Audit the Irys-anchored demo agent from the gateway alone
+        if: steps.secrets.outputs.ready == 'true'
+        env:
+          LATH_DEVNET_RPC: ${{ secrets.LATH_DEVNET_RPC }}
+          LATH_DA_AGENT: ${{ vars.LATH_DA_AGENT || '7c9fccf93e120356da3235daf5e6a0d325bf6394901697c92a32559bfb13a2fd' }}
+        # No `--rpc` here on purpose: the url is a Helius endpoint whose query string *is* an API
+        # key, and an argument is visible to anything that can read the process table and lands in
+        # any `set -x` trace or log line that echoes the command. `lath-audit` reads
+        # LATH_DEVNET_RPC from the environment when the flag is absent, which is how every
+        # automated caller passes it. The flag stays for local use.
+        run: |
+          npm run -s audit -- "$LATH_DA_AGENT" \
+            --gateway https://gateway.irys.xyz --scheme 4 --encoding base64url --require-preimages
+
+      # The uploader's second balance. The suite's payer is this workflow's wallet, but the
+      # console's uploads are paid by its runtime key at Irys; print what it holds there so a
+      # drained balance is seen before a session refuses to start.
+      - name: Irys balance of the payer
+        if: always() && steps.secrets.outputs.ready == 'true'
+        env:
+          LATH_DEVNET_RPC: ${{ secrets.LATH_DEVNET_RPC }}
+          ANCHOR_WALLET: /home/runner/.config/solana/id.json
+        run: npm run -s irys -- balance
+
+      - name: Payer balance
+        if: always() && steps.secrets.outputs.ready == 'true'
+        env:
+          LATH_DEVNET_RPC: ${{ secrets.LATH_DEVNET_RPC }}
+        run: |
+          npx ts-node -r tsconfig-paths/register -e '
+            const { Connection, Keypair } = require("@solana/web3.js");
+            const fs = require("fs");
+            (async () => {
+              const kp = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(fs.readFileSync(process.env.ANCHOR_WALLET || process.env.HOME + "/.config/solana/id.json", "utf8"))));
+              const lamports = await new Connection(process.env.LATH_DEVNET_RPC).getBalance(kp.publicKey);
+              console.log(`${kp.publicKey.toBase58()}: ${lamports / 1e9} SOL`);
+              if (lamports < 100_000_000) console.log("::warning::devnet payer is below 0.1 SOL");
+            })();
+          '
+
+      - name: Remove the keypair
+        if: always()
+        run: rm -f ~/.config/solana/id.json

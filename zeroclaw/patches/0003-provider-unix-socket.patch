@@ -1,0 +1,511 @@
+From dbaf1574b15e60eb73aa0e13b508db852146911d Mon Sep 17 00:00:00 2001
+From: Lath <lath.solana@gmail.com>
+Date: Thu, 24 Sep 2026 17:22:55 -0300
+Subject: [PATCH 3/6] providers: a custom provider over a Unix socket, and the
+ Lath build accepts nothing else
+
+Adds `unix_socket` to a provider entry. The custom provider then builds two clients at construction, with no_proxy, no redirects and reqwest's unix_socket, and both http_client paths return them before the shared proxy-aware cache, so there is no Client::new() fallback. The responses wire is refused beside a socket because it would build its own network client. Under the lath feature a custom provider without an absolute socket, a uri other than http://localhost/<path>, or provider_retries other than 0 is fatal at startup and at construction. Unset, nothing changes.
+---
+ crates/zeroclaw-config/src/schema.rs        |  10 +
+ crates/zeroclaw-providers/src/compatible.rs | 191 ++++++++++++++++++++
+ crates/zeroclaw-providers/src/factory.rs    |  30 +++
+ crates/zeroclaw-providers/src/lath.rs       | 100 ++++++++++
+ crates/zeroclaw-providers/src/lib.rs        |   5 +
+ 5 files changed, 336 insertions(+)
+
+diff --git a/crates/zeroclaw-config/src/schema.rs b/crates/zeroclaw-config/src/schema.rs
+index 6bd5bff..e03f41b 100644
+--- a/crates/zeroclaw-config/src/schema.rs
++++ b/crates/zeroclaw-config/src/schema.rs
+@@ -1087,6 +1087,16 @@ pub struct ModelProviderConfig {
+     #[tab(Connection)]
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub tls_ca_cert_path: Option<String>,
++    /// Absolute path of a Unix socket every request to this provider is sent
++    /// over, instead of connecting to `uri`'s host. `uri` still supplies the
++    /// request path and the `Host` header, so set it to
++    /// `http://localhost/<path>`; there is no DNS lookup, no TCP connection,
++    /// no proxy and no redirect. Supported by the `custom` family on the
++    /// chat-completions wire, for a local gateway or metering proxy that
++    /// listens on a socket file. Leave unset to connect over the network.
++    #[tab(Connection)]
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub unix_socket: Option<String>,
+ }
+ 
+ // ── Per-family model model_provider configs ────────────────────────────
+diff --git a/crates/zeroclaw-providers/src/compatible.rs b/crates/zeroclaw-providers/src/compatible.rs
+index e128b4b..53b4380 100644
+--- a/crates/zeroclaw-providers/src/compatible.rs
++++ b/crates/zeroclaw-providers/src/compatible.rs
+@@ -23,6 +23,68 @@ use zeroclaw_config::schema::{CacheTtl, ToolResultImagePolicy};
+ 
+ const TOOL_RESULT_IMAGE_OMITTED_NOTICE: &str = "[tool-result image omitted by provider policy]";
+ 
++/// The two HTTP clients of a provider that talks to a Unix socket instead of
++/// the network: one for request/response calls (bounded by the provider's
++/// timeout) and one for streams (bounded by the idle read timeout instead,
++/// like [`OpenAiCompatibleModelProvider::streaming_http_client`]).
++///
++/// Both are built once, when the provider is constructed, so a socket that
++/// cannot be configured is a construction error and never a silent fallback
++/// to a network client. Each ignores `HTTP_PROXY` and friends (`no_proxy`),
++/// follows no redirect, and does no DNS lookup: reqwest sends every
++/// connection to the socket whatever host the URL names.
++#[derive(Clone)]
++pub struct UnixSocketClients {
++    request: Client,
++    streaming: Client,
++}
++
++impl UnixSocketClients {
++    /// Build both clients for `path`, which must be absolute.
++    pub fn connect(
++        path: &std::path::Path,
++        timeout_secs: u64,
++        extra_headers: &std::collections::HashMap<String, String>,
++    ) -> anyhow::Result<Self> {
++        if !path.is_absolute() {
++            anyhow::bail!("unix_socket `{}` must be an absolute path", path.display());
++        }
++        let mut headers = HeaderMap::new();
++        for (key, value) in extra_headers {
++            let name = reqwest::header::HeaderName::from_bytes(key.as_bytes())
++                .map_err(|_| anyhow::Error::msg(format!("invalid extra header name `{key}`")))?;
++            let value = HeaderValue::from_str(value).map_err(|_| {
++                anyhow::Error::msg(format!("invalid value for extra header `{key}`"))
++            })?;
++            headers.insert(name, value);
++        }
++        let timeout =
++            std::time::Duration::from_secs(if timeout_secs > 0 { timeout_secs } else { 120 });
++        let request = Self::builder(path, headers.clone())?
++            .timeout(timeout)
++            .build()?;
++        let streaming = Self::builder(path, headers)?
++            .read_timeout(super::stream_idle_timeout(timeout_secs).duration())
++            .build()?;
++        Ok(Self { request, streaming })
++    }
++
++    #[cfg(unix)]
++    fn builder(path: &std::path::Path, headers: HeaderMap) -> anyhow::Result<ClientBuilder> {
++        Ok(Client::builder()
++            .no_proxy()
++            .redirect(reqwest::redirect::Policy::none())
++            .connect_timeout(std::time::Duration::from_secs(10))
++            .default_headers(headers)
++            .unix_socket(path.to_path_buf()))
++    }
++
++    #[cfg(not(unix))]
++    fn builder(path: &std::path::Path, _headers: HeaderMap) -> anyhow::Result<ClientBuilder> {
++        anyhow::bail!("unix_socket `{}` needs a Unix platform", path.display())
++    }
++}
++
+ /// A model_provider that speaks the OpenAI-compatible chat completions API.
+ /// Used by: Venice, Vercel AI Gateway, Cloudflare AI Gateway, Moonshot,
+ /// Synthetic, `OpenCode` Zen, `OpenCode` Go, `Z.AI`, `GLM`, `MiniMax`, Bedrock, Qianfan, Groq, Mistral, `xAI`, etc.
+@@ -99,6 +161,10 @@ pub struct OpenAiCompatibleModelProvider {
+     tls_ca_cert_pem: Option<Vec<u8>>,
+     /// Extra JSON fields merged into every API request body.
+     extra_body: Option<serde_json::Value>,
++    /// Clients bound to a Unix socket (`[providers.models.<type>.<alias>]
++    /// unix_socket`). When set, every request goes through them and the
++    /// shared proxy-aware client cache is never consulted.
++    unix_socket: Option<UnixSocketClients>,
+     /// Memoized cleaned tool schemas: each registered schema is cleaned once
+     /// per strategy per provider instance and then `Arc`-shared into every
+     /// request body instead of being deep-copied per request. `Arc` so
+@@ -503,6 +569,7 @@ pub struct OpenAiCompatibleBuilder {
+     public_model_listing: bool,
+     tls_ca_cert_path: Option<String>,
+     extra_body: Option<serde_json::Value>,
++    unix_socket: Option<UnixSocketClients>,
+     auth_model_provider: Option<String>,
+     auth_service: Option<AuthService>,
+     auth_profile_override: Option<String>,
+@@ -715,6 +782,13 @@ impl OpenAiCompatibleBuilder {
+         self
+     }
+ 
++    /// Send every request over these Unix-socket clients instead of the
++    /// network (see [`UnixSocketClients::connect`]).
++    pub fn unix_socket(mut self, clients: UnixSocketClients) -> Self {
++        self.unix_socket = Some(clients);
++        self
++    }
++
+     /// Use a stored auth profile as a bearer credential when no explicit
+     /// `api_key` was configured on this provider entry.
+     pub fn auth_profile(
+@@ -811,6 +885,7 @@ impl OpenAiCompatibleBuilder {
+             public_model_listing: self.public_model_listing,
+             tls_ca_cert_pem,
+             extra_body: self.extra_body,
++            unix_socket: self.unix_socket,
+             schema_cache: std::sync::Arc::new(zeroclaw_api::schema::SchemaCleanCache::new()),
+         }
+     }
+@@ -854,6 +929,7 @@ impl OpenAiCompatibleModelProvider {
+             public_model_listing: false,
+             tls_ca_cert_path: None,
+             extra_body: None,
++            unix_socket: None,
+             auth_model_provider: None,
+             auth_service: None,
+             auth_profile_override: None,
+@@ -929,6 +1005,12 @@ impl OpenAiCompatibleModelProvider {
+     }
+ 
+     fn http_client(&self) -> Client {
++        // A socket-bound provider returns before the shared, proxy-aware
++        // client cache below, and has no `Client::new()` fallback: its
++        // clients were built at construction, or the provider was not.
++        if let Some(socket) = &self.unix_socket {
++            return socket.request.clone();
++        }
+         let timeout = self.timeout_secs;
+         let has_user_agent = self.user_agent.is_some();
+         let has_extra_headers = !self.extra_headers.is_empty();
+@@ -1008,6 +1090,9 @@ impl OpenAiCompatibleModelProvider {
+     /// `timeout_secs` raises the bound to match. Streaming paths must use this
+     /// client instead of http_client().
+     fn streaming_http_client(&self) -> Client {
++        if let Some(socket) = &self.unix_socket {
++            return socket.streaming.clone();
++        }
+         let endpoint = self.chat_completions_url();
+         let has_user_agent = self.user_agent.is_some();
+         let has_extra_headers = !self.extra_headers.is_empty();
+@@ -12475,3 +12560,109 @@ mod tests {
+         assert_eq!(native[1].tool_call_id.as_deref(), Some("fc_456"));
+     }
+ }
++
++#[cfg(all(test, unix))]
++mod unix_socket_tests {
++    use super::*;
++    use tokio::io::{AsyncReadExt, AsyncWriteExt};
++
++    /// A one-request HTTP/1.1 server on a Unix socket: returns the raw request
++    /// it read and answers with one chat-completion body.
++    async fn serve_once(listener: tokio::net::UnixListener) -> String {
++        let (mut stream, _) = listener.accept().await.expect("accept");
++        let mut raw = Vec::new();
++        let mut buf = [0u8; 8192];
++        loop {
++            let n = stream.read(&mut buf).await.expect("read");
++            raw.extend_from_slice(&buf[..n]);
++            let text = String::from_utf8_lossy(&raw);
++            if let Some(head_end) = text.find("\r\n\r\n") {
++                let length = text[..head_end]
++                    .lines()
++                    .find_map(|l| {
++                        l.to_ascii_lowercase()
++                            .strip_prefix("content-length:")
++                            .map(|v| v.trim().parse::<usize>().unwrap())
++                    })
++                    .unwrap_or(0);
++                if raw.len() >= head_end + 4 + length {
++                    break;
++                }
++            }
++            if n == 0 {
++                break;
++            }
++        }
++        let body = r#"{"choices":[{"message":{"content":"over the socket"}}]}"#;
++        let response = format!(
++            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
++            body.len()
++        );
++        stream.write_all(response.as_bytes()).await.expect("write");
++        String::from_utf8_lossy(&raw).into_owned()
++    }
++
++    #[tokio::test]
++    async fn a_socket_provider_sends_its_request_over_the_socket() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("m.sock");
++        let listener = tokio::net::UnixListener::bind(&path).unwrap();
++        let server = tokio::spawn(serve_once(listener));
++        let clients = UnixSocketClients::connect(&path, 30, &Default::default()).unwrap();
++        let provider = OpenAiCompatibleModelProvider::builder("lath")
++            .display_name("Custom")
++            // The host is never resolved: reqwest connects to the socket.
++            .base_url("http://localhost/v1")
++            .credential(Some("step-token"))
++            .auth_style(AuthStyle::Bearer)
++            .unix_socket(clients)
++            .build();
++        let reply = provider
++            .chat_with_system(None, "hello", "m", Some(0.2))
++            .await
++            .unwrap();
++        assert_eq!(reply, "over the socket");
++        let request = server.await.unwrap();
++        assert!(
++            request.starts_with("POST /v1/chat/completions HTTP/1.1\r\n"),
++            "{request}"
++        );
++        assert!(
++            request.to_ascii_lowercase().contains("host: localhost"),
++            "{request}"
++        );
++        assert!(request.contains("Bearer step-token"), "{request}");
++    }
++
++    #[test]
++    fn a_relative_socket_path_is_refused() {
++        let err =
++            UnixSocketClients::connect(std::path::Path::new("m.sock"), 30, &Default::default())
++                .err()
++                .expect("relative path refused")
++                .to_string();
++        assert!(err.contains("m.sock"), "{err}");
++    }
++
++    #[test]
++    fn a_socket_with_the_responses_wire_is_refused_at_construction() {
++        use crate::factory::FamilyProviderFactory;
++        use zeroclaw_config::schema::{CustomModelProviderConfig, ModelProviderConfig, WireApi};
++        let cfg = CustomModelProviderConfig {
++            base: ModelProviderConfig {
++                wire_api: Some(WireApi::Responses),
++                ..Default::default()
++            },
++        };
++        let opts = crate::ModelProviderRuntimeOptions {
++            unix_socket: Some("/tmp/m.sock".into()),
++            ..Default::default()
++        };
++        let err = cfg
++            .create_provider("lath", None, Some("http://localhost/v1"), &opts)
++            .err()
++            .expect("refused")
++            .to_string();
++        assert!(err.contains("unix_socket"), "{err}");
++    }
++}
+diff --git a/crates/zeroclaw-providers/src/factory.rs b/crates/zeroclaw-providers/src/factory.rs
+index dfced77..db2b5f9 100644
+--- a/crates/zeroclaw-providers/src/factory.rs
++++ b/crates/zeroclaw-providers/src/factory.rs
+@@ -1958,6 +1958,33 @@ impl FamilyProviderFactory for CustomModelProviderConfig {
+                  `[providers.models.custom.<alias>] uri = \"https://your-api.com\"` in config.toml.",
+             )
+         })?;
++        #[cfg(feature = "lath")]
++        crate::lath::check_socket_provider(alias, opts.unix_socket.as_deref(), base_url)?;
++        let unix_socket = match opts.unix_socket.as_deref() {
++            Some(path) => {
++                // The socket client speaks chat completions; the Responses
++                // provider builds its own network client and would bypass it.
++                if self.base.wire_api == Some(zeroclaw_config::schema::WireApi::Responses) {
++                    anyhow::bail!(
++                        "providers.models.custom.{alias}: `unix_socket` is supported on the \
++                         chat-completions wire only, not `wire_api = \"responses\"`"
++                    );
++                }
++                Some(
++                    crate::compatible::UnixSocketClients::connect(
++                        std::path::Path::new(path),
++                        opts.provider_timeout_secs.unwrap_or(120),
++                        &opts.extra_headers,
++                    )
++                    .map_err(|e| {
++                        anyhow::Error::msg(format!(
++                            "providers.models.custom.{alias}.unix_socket: {e}"
++                        ))
++                    })?,
++                )
++            }
++            None => None,
++        };
+         if let Some(p) = build_responses_provider_if_requested(
+             self.base.wire_api,
+             alias,
+@@ -1973,6 +2000,9 @@ impl FamilyProviderFactory for CustomModelProviderConfig {
+             .credential(key)
+             .auth_style(AuthStyle::Bearer)
+             .vision(true);
++        if let Some(clients) = unix_socket {
++            b = b.unix_socket(clients);
++        }
+         if opts.native_tools != Some(true) {
+             b = b.without_native_tools();
+         }
+diff --git a/crates/zeroclaw-providers/src/lath.rs b/crates/zeroclaw-providers/src/lath.rs
+index 4fcf266..20bad4b 100644
+--- a/crates/zeroclaw-providers/src/lath.rs
++++ b/crates/zeroclaw-providers/src/lath.rs
+@@ -15,6 +15,11 @@
+ //!   request with the offending key in the error, instead of on the one path
+ //!   that happens to reach it.
+ //!
++//! The one provider the Lath build does construct reaches its endpoint over a
++//! Unix socket and nothing else ([`check_socket_provider`]): no TCP, no DNS,
++//! no proxy, and no retry, since a retried request is a second paid call the
++//! host did not meter as one.
++//!
+ //! Every refusal names what it refused: the host turns a non-zero exit into a
+ //! failed step and shows the message, so the message is the diagnosis.
+ 
+@@ -57,6 +62,33 @@ pub fn check_construction(
+     Ok(())
+ }
+ 
++/// The prefix every Lath provider `uri` must carry. Over a Unix socket the
++/// host part is never resolved; it only fills the `Host` header, so it is
++/// pinned to one value rather than left to name a reachable machine.
++pub const LATH_PROVIDER_URI_PREFIX: &str = "http://localhost/";
++
++/// Refuse a `custom` provider that would not reach its endpoint over an
++/// absolute Unix socket, or whose `uri` names anything but the socket.
++pub fn check_socket_provider(alias: &str, unix_socket: Option<&str>, uri: &str) -> Result<()> {
++    let key = format!("providers.models.custom.{alias}");
++    let Some(socket) = unix_socket.map(str::trim).filter(|s| !s.is_empty()) else {
++        bail!(
++            "lath: `{key}.unix_socket` is required: the Lath build reaches its model over a \
++             Unix socket only"
++        );
++    };
++    if !std::path::Path::new(socket).is_absolute() {
++        bail!("lath: refused `{key}.unix_socket = \"{socket}\"`: the socket path must be absolute");
++    }
++    if !uri.trim().starts_with(LATH_PROVIDER_URI_PREFIX) {
++        bail!(
++            "lath: refused `{key}.uri = \"{uri}\"`: over the socket the uri must be \
++             `{LATH_PROVIDER_URI_PREFIX}<path>`, never a network address"
++        );
++    }
++    Ok(())
++}
++
+ /// Walk every provider the config or the command line can name, and refuse
+ /// the first one the Lath build would not construct.
+ ///
+@@ -103,6 +135,18 @@ pub fn check_config(config: &Config, provider_override: Option<&str>) -> Result<
+                  the Lath build speaks chat completions only"
+             );
+         }
++        check_socket_provider(
++            alias,
++            entry.unix_socket.as_deref(),
++            entry.uri.as_deref().unwrap_or_default(),
++        )?;
++    }
++    if config.reliability.provider_retries != 0 {
++        bail!(
++            "lath: refused `reliability.provider_retries = {}`: a step makes each model call \
++             once, so the host meters exactly the calls it sees",
++            config.reliability.provider_retries
++        );
+     }
+     if let Some(route) = config.model_routes.first() {
+         bail!(
+@@ -150,6 +194,8 @@ mod tests {
+         let entry = cfg.providers.models.ensure("custom", "lath").unwrap();
+         entry.model = Some("m".into());
+         entry.uri = Some("http://localhost/v1".into());
++        entry.unix_socket = Some("/lath/m.sock".into());
++        cfg.reliability.provider_retries = 0;
+         let agent = AliasedAgentConfig {
+             model_provider: "custom.lath".into(),
+             ..AliasedAgentConfig::default()
+@@ -271,6 +317,60 @@ mod tests {
+         assert!(err.contains("openrouter"), "{err}");
+     }
+ 
++    #[test]
++    fn config_walk_refuses_a_provider_without_a_socket() {
++        let mut cfg = lath_config();
++        cfg.providers
++            .models
++            .ensure("custom", "lath")
++            .unwrap()
++            .unix_socket = None;
++        let err = check_config(&cfg, None).unwrap_err().to_string();
++        assert!(
++            err.contains("providers.models.custom.lath.unix_socket"),
++            "{err}"
++        );
++    }
++
++    #[test]
++    fn config_walk_refuses_a_relative_socket() {
++        let mut cfg = lath_config();
++        cfg.providers
++            .models
++            .ensure("custom", "lath")
++            .unwrap()
++            .unix_socket = Some("m.sock".into());
++        let err = check_config(&cfg, None).unwrap_err().to_string();
++        assert!(err.contains("\"m.sock\""), "{err}");
++    }
++
++    #[test]
++    fn config_walk_refuses_a_tcp_uri() {
++        for uri in [
++            "http://127.0.0.1:8080/v1",
++            "https://openrouter.ai/api/v1",
++            "http://localhost:9/v1",
++        ] {
++            let mut cfg = lath_config();
++            cfg.providers.models.ensure("custom", "lath").unwrap().uri = Some(uri.into());
++            let err = check_config(&cfg, None).unwrap_err().to_string();
++            assert!(err.contains(uri), "{err}");
++        }
++    }
++
++    #[test]
++    fn config_walk_refuses_retries() {
++        let mut cfg = lath_config();
++        cfg.reliability.provider_retries = 1;
++        let err = check_config(&cfg, None).unwrap_err().to_string();
++        assert!(err.contains("provider_retries = 1"), "{err}");
++    }
++
++    #[test]
++    fn the_socket_check_accepts_the_contract_shape() {
++        check_socket_provider("lath", Some("/tmp/lzc/m.sock"), "http://localhost/v1").unwrap();
++    }
++
+     #[test]
+     fn the_walk_sees_custom_entries_under_the_family_the_construction_check_uses() {
+         let families: Vec<_> = lath_config()
+diff --git a/crates/zeroclaw-providers/src/lib.rs b/crates/zeroclaw-providers/src/lib.rs
+index a3bbc0a..930b3ec 100644
+--- a/crates/zeroclaw-providers/src/lib.rs
++++ b/crates/zeroclaw-providers/src/lib.rs
+@@ -752,6 +752,9 @@ pub struct ModelProviderRuntimeOptions {
+     pub chat_template_kwargs: Option<serde_json::Value>,
+     /// Path to a custom CA certificate file for TLS connections.
+     pub tls_ca_cert_path: Option<String>,
++    /// Unix socket every request is sent over, instead of `provider_api_url`'s
++    /// host. Propagated from `ModelProviderConfig::unix_socket`.
++    pub unix_socket: Option<String>,
+     /// How compatible chat-completions providers handle image markers in
+     /// native role=`tool` results.
+     pub tool_result_image_policy: zeroclaw_config::schema::ToolResultImagePolicy,
+@@ -792,6 +795,7 @@ impl Default for ModelProviderRuntimeOptions {
+             vision: None,
+             chat_template_kwargs: None,
+             tls_ca_cert_path: None,
++            unix_socket: None,
+             tool_result_image_policy: Default::default(),
+             multimodal: Default::default(),
+         }
+@@ -860,6 +864,7 @@ pub fn model_provider_runtime_options_from_model_provider_entry(
+         vision: entry.and_then(|e| e.vision),
+         chat_template_kwargs: entry.and_then(|e| e.chat_template_kwargs.clone()),
+         tls_ca_cert_path,
++        unix_socket: entry.and_then(|e| e.unix_socket.clone()),
+         tool_result_image_policy: entry
+             .map(|e| e.tool_result_image_policy)
+             .unwrap_or_default(),
+-- 
+2.50.1 (Apple Git-155)
+

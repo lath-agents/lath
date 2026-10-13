@@ -1,0 +1,2079 @@
+{
+  "address": "AzAeQaquLE634eGz4kFEosuqGoDpB71D7dhQoAe6BKKz",
+  "metadata": {
+    "name": "lath",
+    "version": "0.1.0",
+    "spec": "0.1.0",
+    "description": "Lath: ZK-compressed agent event log on Solana (Light Protocol)"
+  },
+  "instructions": [
+    {
+      "name": "close_agent",
+      "docs": [
+        "Retires an agent by closing its `AgentState` compressed account. `EventRecord`s are",
+        "separate accounts and are untouched, so the history stays readable and replayable —",
+        "only the appendable head goes away, and with it the ability to log anything further.",
+        "",
+        "This is terminal. The leaf is nullified but the address stays in the address tree, so a",
+        "later `register_agent` for the same `agent_id` fails non-inclusion: the id is spent for",
+        "good. `AgentClosed` records the final `(seq, head)` as the end of the chain."
+      ],
+      "discriminator": [
+        52,
+        185,
+        104,
+        145,
+        157,
+        30,
+        87,
+        237
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "proof",
+          "type": {
+            "defined": {
+              "name": "ValidityProof"
+            }
+          }
+        },
+        {
+          "name": "current",
+          "type": {
+            "defined": {
+              "name": "AgentState"
+            }
+          }
+        },
+        {
+          "name": "agent_meta",
+          "type": {
+            "defined": {
+              "name": "CompressedAccountMeta"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "close_cell",
+      "docs": [
+        "Closes a cell: a `Map` delete, or the provable dequeue of a consumable `Log`. The cell",
+        "is gone from the indexer afterwards, so the fold — and `CellWritten` — are the only",
+        "record that it existed and was consumed (SPEC §12 #11).",
+        "",
+        "No header is involved. A cell's address already says whether it may be closed: only",
+        "`Map` cells and the cells of a consumable `Log` live at addresses this can re-derive,",
+        "and `cell_meta` is validated by the Light system program because the cell is spent.",
+        "An unspent header passed as instruction data would prove nothing."
+      ],
+      "discriminator": [
+        123,
+        236,
+        153,
+        37,
+        166,
+        62,
+        188,
+        78
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "proof",
+          "type": {
+            "defined": {
+              "name": "ValidityProof"
+            }
+          }
+        },
+        {
+          "name": "current",
+          "type": {
+            "defined": {
+              "name": "AgentState"
+            }
+          }
+        },
+        {
+          "name": "agent_meta",
+          "type": {
+            "defined": {
+              "name": "CompressedAccountMeta"
+            }
+          }
+        },
+        {
+          "name": "cell_current",
+          "type": {
+            "defined": {
+              "name": "Cell"
+            }
+          }
+        },
+        {
+          "name": "cell_meta",
+          "type": {
+            "defined": {
+              "name": "CompressedAccountMeta"
+            }
+          }
+        },
+        {
+          "name": "timestamp",
+          "type": "i64"
+        }
+      ]
+    },
+    {
+      "name": "commit_epoch",
+      "docs": [
+        "Anchors an off-chain epoch of batched micro-agent steps by folding a single",
+        "Merkle root into the agent's hash chain. The epoch covers `[start_seq, end_seq)`",
+        "and the chain head jumps from `start_seq` to `end_seq` in one step.",
+        "",
+        "No `EventRecord` compressed accounts are created — the individual steps live",
+        "off-chain in `TraceStore` batch blobs. Only the epoch root is committed.",
+        "",
+        "Chain formula (domain-separated from `next_head` and `next_cell_head`):",
+        "```text",
+        "head = sha256(prev_head || agent_id || \"lattice.epoch\" || start_seq_le || end_seq_le || epoch_root)",
+        "```",
+        "",
+        "The `\"lattice.epoch\"` tag is a frozen legacy string, kept byte-for-byte through the rename",
+        "to Lath: it is a hash input of every epoch already committed on devnet, so respelling it",
+        "would break the audit of chains that are already written."
+      ],
+      "discriminator": [
+        140,
+        0,
+        62,
+        186,
+        73,
+        180,
+        201,
+        179
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "proof",
+          "type": {
+            "defined": {
+              "name": "ValidityProof"
+            }
+          }
+        },
+        {
+          "name": "current",
+          "type": {
+            "defined": {
+              "name": "AgentState"
+            }
+          }
+        },
+        {
+          "name": "agent_meta",
+          "type": {
+            "defined": {
+              "name": "CompressedAccountMeta"
+            }
+          }
+        },
+        {
+          "name": "epoch_root",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "start_seq",
+          "type": "u64"
+        },
+        {
+          "name": "end_seq",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "create_cell",
+      "docs": [
+        "Appends a `Log` cell or `put`s a `Map` cell. Fails if the address already exists, which",
+        "is exactly the non-membership proof a `Set` needs."
+      ],
+      "discriminator": [
+        36,
+        127,
+        53,
+        69,
+        67,
+        146,
+        229,
+        15
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "proof",
+          "type": {
+            "defined": {
+              "name": "ValidityProof"
+            }
+          }
+        },
+        {
+          "name": "current",
+          "type": {
+            "defined": {
+              "name": "AgentState"
+            }
+          }
+        },
+        {
+          "name": "agent_meta",
+          "type": {
+            "defined": {
+              "name": "CompressedAccountMeta"
+            }
+          }
+        },
+        {
+          "name": "header_current",
+          "type": {
+            "defined": {
+              "name": "StructHeader"
+            }
+          }
+        },
+        {
+          "name": "header_meta",
+          "type": {
+            "defined": {
+              "name": "CompressedAccountMeta"
+            }
+          }
+        },
+        {
+          "name": "cell_tree_info",
+          "type": {
+            "defined": {
+              "name": "PackedAddressTreeInfo"
+            }
+          }
+        },
+        {
+          "name": "cell_output_state_tree_index",
+          "type": "u8"
+        },
+        {
+          "name": "input",
+          "type": {
+            "defined": {
+              "name": "CellInput"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "create_struct",
+      "docs": [
+        "Creates a structure header at `[\"hdr\", owner_address, struct_id]`, where `owner_address` is",
+        "the owner's `AgentState` compressed address, not its id (see `HEADER_SEED` for why).",
+        "",
+        "Spending the owner's `AgentState` is what proves the caller may create a structure in",
+        "this owner's namespace — headers are not permissionless, or anyone could plant an",
+        "`append_policy = ANYONE` structure under someone else's id. The creation folds into the",
+        "owner's chain (SPEC §12 #6) with `op = CREATE_STRUCT`, so an auditor sees the mode and",
+        "the policy a structure was created with, not just its cells.",
+        "",
+        "Any kind may carry a non-owner `append_policy` (`ALLOW_LIST` or `ANYONE`), not only a",
+        "Mailbox: an open registry is a deliberate, tested design (`tests/security.ts`), and SPEC §12",
+        "#12 states it. `replace_cell` and `close_cell` stay owner-only whatever the policy. Every",
+        "non-owner append spends the owner's `AgentState`, so it moves the owner's seq and head."
+      ],
+      "discriminator": [
+        219,
+        182,
+        49,
+        226,
+        104,
+        253,
+        220,
+        6
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "proof",
+          "type": {
+            "defined": {
+              "name": "ValidityProof"
+            }
+          }
+        },
+        {
+          "name": "current",
+          "type": {
+            "defined": {
+              "name": "AgentState"
+            }
+          }
+        },
+        {
+          "name": "agent_meta",
+          "type": {
+            "defined": {
+              "name": "CompressedAccountMeta"
+            }
+          }
+        },
+        {
+          "name": "header_tree_info",
+          "type": {
+            "defined": {
+              "name": "PackedAddressTreeInfo"
+            }
+          }
+        },
+        {
+          "name": "header_output_state_tree_index",
+          "type": "u8"
+        },
+        {
+          "name": "params",
+          "type": {
+            "defined": {
+              "name": "StructParams"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "log_event",
+      "docs": [
+        "Appends one event: creates an `EventRecord` at address `(agent_id, seq)` and advances",
+        "the agent's hash chain. Requires one validity proof covering the agent state (inclusion)",
+        "and the new event address (non-inclusion)."
+      ],
+      "discriminator": [
+        5,
+        9,
+        90,
+        141,
+        223,
+        134,
+        57,
+        217
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "proof",
+          "type": {
+            "defined": {
+              "name": "ValidityProof"
+            }
+          }
+        },
+        {
+          "name": "current",
+          "type": {
+            "defined": {
+              "name": "AgentState"
+            }
+          }
+        },
+        {
+          "name": "agent_meta",
+          "type": {
+            "defined": {
+              "name": "CompressedAccountMeta"
+            }
+          }
+        },
+        {
+          "name": "event_tree_info",
+          "type": {
+            "defined": {
+              "name": "PackedAddressTreeInfo"
+            }
+          }
+        },
+        {
+          "name": "event_output_state_tree_index",
+          "type": "u8"
+        },
+        {
+          "name": "input",
+          "type": {
+            "defined": {
+              "name": "EventInput"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "log_event_compact",
+      "docs": [
+        "Cheaper variant: advances the hash chain only (no per-event compressed account).",
+        "The record is emitted as an Anchor event and must be replayed from transaction",
+        "history; use `log_event` when records must be queryable by address."
+      ],
+      "discriminator": [
+        136,
+        222,
+        141,
+        129,
+        194,
+        242,
+        176,
+        70
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "proof",
+          "type": {
+            "defined": {
+              "name": "ValidityProof"
+            }
+          }
+        },
+        {
+          "name": "current",
+          "type": {
+            "defined": {
+              "name": "AgentState"
+            }
+          }
+        },
+        {
+          "name": "agent_meta",
+          "type": {
+            "defined": {
+              "name": "CompressedAccountMeta"
+            }
+          }
+        },
+        {
+          "name": "input",
+          "type": {
+            "defined": {
+              "name": "EventInput"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "log_events",
+      "docs": [
+        "Appends up to `MAX_EVENTS_PER_TX` events in one transaction. Semantically identical to",
+        "calling `log_event` once per input — same chain formula, same addresses, same events —",
+        "but it spends `AgentState` once and rides a single validity proof covering the agent",
+        "account plus every new event address.",
+        "",
+        "The records are passed to the CPI first, in input order, so event `i` is assigned",
+        "account index `i` and the agent state lands last."
+      ],
+      "discriminator": [
+        106,
+        61,
+        231,
+        230,
+        195,
+        206,
+        82,
+        193
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "proof",
+          "type": {
+            "defined": {
+              "name": "ValidityProof"
+            }
+          }
+        },
+        {
+          "name": "current",
+          "type": {
+            "defined": {
+              "name": "AgentState"
+            }
+          }
+        },
+        {
+          "name": "agent_meta",
+          "type": {
+            "defined": {
+              "name": "CompressedAccountMeta"
+            }
+          }
+        },
+        {
+          "name": "event_tree_info",
+          "type": {
+            "defined": {
+              "name": "PackedAddressTreeInfo"
+            }
+          }
+        },
+        {
+          "name": "event_output_state_tree_index",
+          "type": "u8"
+        },
+        {
+          "name": "inputs",
+          "type": {
+            "vec": {
+              "defined": {
+                "name": "EventInput"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "register_agent",
+      "docs": [
+        "Creates the compressed `AgentState` account for `agent_id`, owned by the signer.",
+        "",
+        "`created_at` is bounded like every other client-attested timestamp. It is attested",
+        "metadata — §4.4 does not read it — but an unbounded one let an agent register at",
+        "`i64::MAX`, and this was the only write that skipped the check."
+      ],
+      "discriminator": [
+        135,
+        157,
+        66,
+        195,
+        2,
+        113,
+        175,
+        30
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "proof",
+          "type": {
+            "defined": {
+              "name": "ValidityProof"
+            }
+          }
+        },
+        {
+          "name": "address_tree_info",
+          "type": {
+            "defined": {
+              "name": "PackedAddressTreeInfo"
+            }
+          }
+        },
+        {
+          "name": "output_state_tree_index",
+          "type": "u8"
+        },
+        {
+          "name": "agent_id",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "created_at",
+          "type": "i64"
+        }
+      ]
+    },
+    {
+      "name": "replace_cell",
+      "docs": [
+        "Rewrites a `Map` cell in place (nullify + re-create at the same address), bumping its",
+        "version. `Log` cells are append-only and are refused."
+      ],
+      "discriminator": [
+        78,
+        214,
+        8,
+        149,
+        123,
+        189,
+        111,
+        222
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "proof",
+          "type": {
+            "defined": {
+              "name": "ValidityProof"
+            }
+          }
+        },
+        {
+          "name": "current",
+          "type": {
+            "defined": {
+              "name": "AgentState"
+            }
+          }
+        },
+        {
+          "name": "agent_meta",
+          "type": {
+            "defined": {
+              "name": "CompressedAccountMeta"
+            }
+          }
+        },
+        {
+          "name": "cell_current",
+          "type": {
+            "defined": {
+              "name": "Cell"
+            }
+          }
+        },
+        {
+          "name": "cell_meta",
+          "type": {
+            "defined": {
+              "name": "CompressedAccountMeta"
+            }
+          }
+        },
+        {
+          "name": "input",
+          "type": {
+            "defined": {
+              "name": "CellInput"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "set_append_policy",
+      "docs": [
+        "Rewrites a structure header's `append_policy` and `policy_ref` in place. Owner-only.",
+        "",
+        "An older `runtime-inbox` header may be `ANYONE`, and without this nothing could change that:",
+        "every funded key could go on appending to it, each append spending the owner's `AgentState`",
+        "and advancing its seq and head. The owner can take it to `OWNER_ONLY` (what the runtime",
+        "creates) or to an `ALLOW_LIST`, and the structure stays usable. Closing the header would spend",
+        "its address for good — the address tree never drops one — so the runtime's `ensureCreated`",
+        "would find no header and fail to re-create it on every later session.",
+        "",
+        "The header is spent and re-created at the same address with every other field as it was:",
+        "`len_or_count`, `created_op_seq`, kind, mode and consumability are untouched, so the cells",
+        "already in the structure and the address of the next one do not move. The rewrite folds into",
+        "the owner's chain under `op = SET_APPEND_POLICY`, over the header's bytes as they now stand",
+        "and this write's `op_seq` — the preimage `create_struct` folds, under a different op byte —",
+        "so an auditor sees the policy change in the chain and not only in the account. The event",
+        "carries the policy it replaced, which a replay needs to recompute the `CREATE_STRUCT` fold",
+        "from a header that no longer shows its creation policy."
+      ],
+      "discriminator": [
+        9,
+        211,
+        236,
+        106,
+        126,
+        198,
+        113,
+        219
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "proof",
+          "type": {
+            "defined": {
+              "name": "ValidityProof"
+            }
+          }
+        },
+        {
+          "name": "current",
+          "type": {
+            "defined": {
+              "name": "AgentState"
+            }
+          }
+        },
+        {
+          "name": "agent_meta",
+          "type": {
+            "defined": {
+              "name": "CompressedAccountMeta"
+            }
+          }
+        },
+        {
+          "name": "header_current",
+          "type": {
+            "defined": {
+              "name": "StructHeader"
+            }
+          }
+        },
+        {
+          "name": "header_meta",
+          "type": {
+            "defined": {
+              "name": "CompressedAccountMeta"
+            }
+          }
+        },
+        {
+          "name": "new_policy",
+          "type": "u8"
+        },
+        {
+          "name": "new_policy_ref",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "timestamp",
+          "type": "i64"
+        }
+      ]
+    },
+    {
+      "name": "set_authority",
+      "docs": [
+        "Hands the agent to a new authority. Does **not** touch `seq` or `head`: the chain",
+        "formula (SPEC §4.4) is frozen and has no slot for a non-event transition. The rotation",
+        "is still provable — `authority` is part of the hashed `AgentState`, so spending the old",
+        "account required the old key, and `AuthorityChanged` records the pair in the ledger."
+      ],
+      "discriminator": [
+        133,
+        250,
+        37,
+        21,
+        110,
+        163,
+        26,
+        121
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "proof",
+          "type": {
+            "defined": {
+              "name": "ValidityProof"
+            }
+          }
+        },
+        {
+          "name": "current",
+          "type": {
+            "defined": {
+              "name": "AgentState"
+            }
+          }
+        },
+        {
+          "name": "agent_meta",
+          "type": {
+            "defined": {
+              "name": "CompressedAccountMeta"
+            }
+          }
+        },
+        {
+          "name": "new_authority",
+          "type": "pubkey"
+        }
+      ]
+    }
+  ],
+  "events": [
+    {
+      "name": "AgentClosed",
+      "discriminator": [
+        72,
+        133,
+        207,
+        59,
+        220,
+        188,
+        201,
+        165
+      ]
+    },
+    {
+      "name": "AgentRegistered",
+      "discriminator": [
+        191,
+        78,
+        217,
+        54,
+        232,
+        100,
+        189,
+        85
+      ]
+    },
+    {
+      "name": "AgentState",
+      "discriminator": [
+        8,
+        247,
+        47,
+        221,
+        177,
+        224,
+        104,
+        68
+      ]
+    },
+    {
+      "name": "AppendPolicySet",
+      "discriminator": [
+        53,
+        209,
+        24,
+        68,
+        242,
+        187,
+        196,
+        4
+      ]
+    },
+    {
+      "name": "AuthorityChanged",
+      "discriminator": [
+        31,
+        19,
+        174,
+        152,
+        4,
+        82,
+        215,
+        226
+      ]
+    },
+    {
+      "name": "Cell",
+      "discriminator": [
+        168,
+        106,
+        202,
+        5,
+        142,
+        146,
+        250,
+        94
+      ]
+    },
+    {
+      "name": "CellWritten",
+      "discriminator": [
+        116,
+        108,
+        216,
+        56,
+        124,
+        0,
+        190,
+        1
+      ]
+    },
+    {
+      "name": "EpochCommitted",
+      "discriminator": [
+        165,
+        83,
+        91,
+        255,
+        184,
+        39,
+        148,
+        50
+      ]
+    },
+    {
+      "name": "EventLogged",
+      "discriminator": [
+        100,
+        251,
+        68,
+        255,
+        63,
+        97,
+        173,
+        100
+      ]
+    },
+    {
+      "name": "EventRecord",
+      "discriminator": [
+        10,
+        17,
+        198,
+        135,
+        200,
+        168,
+        129,
+        240
+      ]
+    },
+    {
+      "name": "StructCreated",
+      "discriminator": [
+        110,
+        35,
+        196,
+        45,
+        224,
+        34,
+        29,
+        200
+      ]
+    },
+    {
+      "name": "StructHeader",
+      "discriminator": [
+        188,
+        127,
+        5,
+        2,
+        70,
+        16,
+        45,
+        211
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "code": 6000,
+      "name": "Unauthorized",
+      "msg": "Signer is not the agent authority"
+    },
+    {
+      "code": 6001,
+      "name": "InvalidKind",
+      "msg": "Unknown event kind"
+    },
+    {
+      "code": 6002,
+      "name": "InvalidAddressTree",
+      "msg": "Address tree must be the v2 address tree"
+    },
+    {
+      "code": 6003,
+      "name": "Overflow",
+      "msg": "Sequence overflow"
+    },
+    {
+      "code": 6004,
+      "name": "TimestampTooFarInFuture",
+      "msg": "Timestamp is more than 5 minutes ahead of the cluster clock"
+    },
+    {
+      "code": 6005,
+      "name": "InvalidBatchSize",
+      "msg": "Batch must hold between 1 and MAX_EVENTS_PER_TX events"
+    },
+    {
+      "code": 6006,
+      "name": "InvalidAuthority",
+      "msg": "New authority must not be the default pubkey"
+    },
+    {
+      "code": 6007,
+      "name": "InvalidStructKind",
+      "msg": "Unknown structure kind"
+    },
+    {
+      "code": 6008,
+      "name": "InvalidStructMode",
+      "msg": "Unknown structure mode"
+    },
+    {
+      "code": 6009,
+      "name": "InvalidAppendPolicy",
+      "msg": "Unknown append policy"
+    },
+    {
+      "code": 6010,
+      "name": "HeaderMismatch",
+      "msg": "Header does not belong to this owner and struct_id"
+    },
+    {
+      "code": 6011,
+      "name": "CellMismatch",
+      "msg": "Cell does not belong to this header"
+    },
+    {
+      "code": 6012,
+      "name": "LogNotReplaceable",
+      "msg": "Log cells are append-only and cannot be replaced"
+    },
+    {
+      "code": 6013,
+      "name": "NotConsumable",
+      "msg": "This Log is not consumable, so its cells cannot be closed"
+    },
+    {
+      "code": 6014,
+      "name": "AppendNotAllowed",
+      "msg": "Signer is not allowed to append to this structure"
+    },
+    {
+      "code": 6015,
+      "name": "IndexMismatch",
+      "msg": "Log index must be the header length"
+    },
+    {
+      "code": 6016,
+      "name": "InvalidEpochBounds",
+      "msg": "Epoch end_seq must be greater than start_seq"
+    },
+    {
+      "code": 6017,
+      "name": "EpochSeqMismatch",
+      "msg": "Epoch start_seq must equal current agent seq"
+    },
+    {
+      "code": 6018,
+      "name": "EpochTooLong",
+      "msg": "Epoch spans more than MAX_EPOCH_SPAN (u32::MAX) steps"
+    }
+  ],
+  "types": [
+    {
+      "name": "AgentClosed",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "agent_id",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "final_seq",
+            "type": "u64"
+          },
+          {
+            "name": "final_head",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "AgentRegistered",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "agent_id",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "authority",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "AgentState",
+      "docs": [
+        "Per-agent compressed account (120 bytes of data)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "agent_id",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "seq",
+            "type": "u64"
+          },
+          {
+            "name": "head",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "created_at",
+            "type": "i64"
+          },
+          {
+            "name": "updated_at",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "AppendPolicySet",
+      "docs": [
+        "One `set_append_policy`. The header keeps only the policy it has now, so the policy it",
+        "*had* lives here and nowhere else on chain: a replay that recomputes the structure's",
+        "`CREATE_STRUCT` fold from the account must put `previous_policy` / `previous_policy_ref` back",
+        "first, and `head` is what the rewrite itself folded to at `op_seq`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "owner_id",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "struct_id",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "previous_policy",
+            "type": "u8"
+          },
+          {
+            "name": "previous_policy_ref",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "append_policy",
+            "type": "u8"
+          },
+          {
+            "name": "policy_ref",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "op_seq",
+            "type": "u64"
+          },
+          {
+            "name": "head",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "AuthorityChanged",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "agent_id",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "previous",
+            "type": "pubkey"
+          },
+          {
+            "name": "new_authority",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Cell",
+      "docs": [
+        "One cell of a `Log` or `Map` (187 bytes of data).",
+        "",
+        "Fixed width, and the byte offsets are ABI: Photon `memcmp` at `owner_id`\\@0,",
+        "`struct_id`\\@32, `tag`\\@88 and `key_slot`\\@91 is the only way to enumerate cells",
+        "(SPEC §12 #4)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "owner_id",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "struct_id",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "index_or_version",
+            "docs": [
+              "`Log`: the cell's index. `Map`: how many times this key has been written (0 = created)."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "op_seq",
+            "docs": [
+              "The owner's operation counter at this write — `AgentState.seq`, which every write to",
+              "any structure advances. Dense per owner, so a replay can order events and cells from",
+              "different structures against each other, and a gap is detectable."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "timestamp",
+            "type": "i64"
+          },
+          {
+            "name": "tag",
+            "type": "u8"
+          },
+          {
+            "name": "status",
+            "type": "u16"
+          },
+          {
+            "name": "key_slot",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "value_slot",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "head",
+            "docs": [
+              "The owner's chain head after this write."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "CellInput",
+      "docs": [
+        "The caller-supplied half of a cell. `owner_id`, `struct_id`, `index_or_version`, `op_seq`",
+        "and `head` are all derived by the program, never taken from the caller."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "timestamp",
+            "docs": [
+              "Client-attested unix ms, bounded by `check_timestamp` like every other write."
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "tag",
+            "docs": [
+              "User-level type tag (event `kind`, edge label, message type…)."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "status",
+            "type": "u16"
+          },
+          {
+            "name": "key_slot",
+            "docs": [
+              "`Map`: `sha256(key)` public / `sha256(map_secret ‖ key)` private — it *is* the address",
+              "component. `Log`: a `reference`-style link, indexable but not addressing."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "value_slot",
+            "docs": [
+              "Raw value (public, ≤ 32 B, caller-padded) or `sha256(salt ‖ value)` (private). Values",
+              "that do not fit are committed by hash and kept in the `TraceStore`."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "allow_list_proof",
+            "docs": [
+              "`ALLOW_LIST` policy only: sibling hashes from the signer's leaf up to `allow_list_root`."
+            ],
+            "type": {
+              "vec": {
+                "array": [
+                  "u8",
+                  32
+                ]
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "CellWritten",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "owner_id",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "struct_id",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "index_or_version",
+            "type": "u64"
+          },
+          {
+            "name": "op_seq",
+            "type": "u64"
+          },
+          {
+            "name": "op",
+            "docs": [
+              "One of `cell_op::*`."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "head",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "CompressedAccountMeta",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "tree_info",
+            "docs": [
+              "Merkle tree context."
+            ],
+            "type": {
+              "defined": {
+                "name": "PackedStateTreeInfo"
+              }
+            }
+          },
+          {
+            "name": "address",
+            "docs": [
+              "Address."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "output_state_tree_index",
+            "docs": [
+              "Output merkle tree index."
+            ],
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "CompressedProof",
+      "repr": {
+        "kind": "c"
+      },
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "a",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "b",
+            "type": {
+              "array": [
+                "u8",
+                64
+              ]
+            }
+          },
+          {
+            "name": "c",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "EpochCommitted",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "agent_id",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "epoch_root",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "start_seq",
+            "type": "u64"
+          },
+          {
+            "name": "end_seq",
+            "type": "u64"
+          },
+          {
+            "name": "head",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "EventInput",
+      "docs": [
+        "Instruction payload for one event. 75 bytes (SPEC §4.3)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "timestamp",
+            "docs": [
+              "Client-attested unix timestamp (ms)."
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "kind",
+            "docs": [
+              "One of `kind::*`."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "status",
+            "docs": [
+              "ACTION: tool status code. RESOLUTION: 0 success / 1 failed / 2 aborted. Else 0."
+            ],
+            "type": "u16"
+          },
+          {
+            "name": "reference",
+            "docs": [
+              "Indexable 32-byte link whose meaning depends on `kind` (see `kind` docs)."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "payload_hash",
+            "docs": [
+              "sha256 of the canonical typed payload (see SDK `hashPayload`)."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "EventLogged",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "agent_id",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "seq",
+            "type": "u64"
+          },
+          {
+            "name": "kind",
+            "type": "u8"
+          },
+          {
+            "name": "head",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "EventRecord",
+      "docs": [
+        "Per-event compressed account (147 bytes of data). Address = derive([\"event\", agent_id, seq_le])."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "agent_id",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "seq",
+            "type": "u64"
+          },
+          {
+            "name": "timestamp",
+            "type": "i64"
+          },
+          {
+            "name": "kind",
+            "type": "u8"
+          },
+          {
+            "name": "status",
+            "type": "u16"
+          },
+          {
+            "name": "reference",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "payload_hash",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "head",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "PackedAddressTreeInfo",
+      "docs": [
+        "Packed address tree info for instruction data.",
+        "Contains indices to address tree accounts and root index."
+      ],
+      "repr": {
+        "kind": "c"
+      },
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "address_merkle_tree_pubkey_index",
+            "type": "u8"
+          },
+          {
+            "name": "address_queue_pubkey_index",
+            "type": "u8"
+          },
+          {
+            "name": "root_index",
+            "type": "u16"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PackedStateTreeInfo",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "root_index",
+            "type": "u16"
+          },
+          {
+            "name": "prove_by_index",
+            "type": "bool"
+          },
+          {
+            "name": "merkle_tree_pubkey_index",
+            "type": "u8"
+          },
+          {
+            "name": "queue_pubkey_index",
+            "type": "u8"
+          },
+          {
+            "name": "leaf_index",
+            "type": "u32"
+          }
+        ]
+      }
+    },
+    {
+      "name": "StructCreated",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "owner_id",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "struct_id",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "kind",
+            "type": "u8"
+          },
+          {
+            "name": "mode",
+            "type": "u8"
+          },
+          {
+            "name": "op_seq",
+            "type": "u64"
+          },
+          {
+            "name": "head",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "StructHeader",
+      "docs": [
+        "Structure header (116 bytes of data). Address = `derive([\"hdr\", owner_address, struct_id])`,",
+        "where `owner_address` is the owner's `AgentState` compressed address, not its id (see",
+        "`HEADER_SEED` for why)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "owner_id",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "struct_id",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "kind",
+            "type": "u8"
+          },
+          {
+            "name": "mode",
+            "type": "u8"
+          },
+          {
+            "name": "len_or_count",
+            "docs": [
+              "`Log`: the next index, i.e. the length. `Map`: how many `put`s the structure has seen.",
+              "",
+              "It counts creates, not live cells: `close_cell` deliberately takes no header (see",
+              "there), so a close cannot decrement it. Live membership is a question for the indexer."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "created_op_seq",
+            "docs": [
+              "The owner's `op_seq` at creation, so a replay can place the structure's creation in the",
+              "owner's operation order without reading transaction history."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "consumable",
+            "type": "bool"
+          },
+          {
+            "name": "append_policy",
+            "type": "u8"
+          },
+          {
+            "name": "policy_ref",
+            "docs": [
+              "See `StructParams::policy_ref`."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "StructParams",
+      "docs": [
+        "Parameters for `create_struct`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "struct_id",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "kind",
+            "docs": [
+              "One of `struct_kind::*`."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "mode",
+            "docs": [
+              "One of `struct_mode::*`."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "consumable",
+            "docs": [
+              "`Log` only: may cells be closed (a mailbox is a consumable Log; an audit log is not)."
+            ],
+            "type": "bool"
+          },
+          {
+            "name": "append_policy",
+            "docs": [
+              "One of `append_policy::*`."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "policy_ref",
+            "docs": [
+              "One 32-byte slot whose meaning is the structure's: `sha256(map_secret)` in private mode",
+              "(so a holder of the secret is checkable without it being on-chain), or the allow-list",
+              "Merkle root under `ALLOW_LIST`. Zero when neither applies. One field rather than two",
+              "because the SBF stack frame of `create_cell` is the binding constraint here."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "created_at",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ValidityProof",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "option": {
+              "defined": {
+                "name": "CompressedProof"
+              }
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

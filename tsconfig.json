@@ -1,0 +1,47 @@
+{
+  "compilerOptions": {
+    "types": [
+      "mocha",
+      "chai",
+      "node"
+    ],
+    "typeRoots": [
+      "./node_modules/@types"
+    ],
+    "lib": [
+      "es2020"
+    ],
+    "module": "commonjs",
+    "target": "es2020",
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "strict": false,
+    "skipLibCheck": true,
+    "baseUrl": ".",
+    "paths": {
+      "@lath/sdk": [
+        "sdk/src/index.ts"
+      ],
+      "@lath/runtime": [
+        "runtime/src/index.ts"
+      ],
+      "@lath/runtime/*": [
+        "runtime/src/*"
+      ],
+      "ox": [
+        "node_modules/viem/node_modules/ox/_types/index.d.ts",
+        "node_modules/ox/_types/index.d.ts"
+      ],
+      "ox/*": [
+        "node_modules/viem/node_modules/ox/_types/*",
+        "node_modules/ox/_types/*"
+      ]
+    }
+  },
+  "include": [
+    "tests/**/*.ts",
+    "sdk/src/**/*.ts",
+    "runtime/src/**/*.ts",
+    "scripts/**/*.ts"
+  ]
+}

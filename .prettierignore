@@ -1,0 +1,19 @@
+node_modules
+target
+test-ledger
+.surfpool
+dist
+sdk/src/idl
+.next
+frontend/next-env.d.ts
+frontend/test-results
+frontend/.next
+frontend/.next-*
+.claude
+scratchpad
+frontend/.walk-*
+zeroclaw/.build
+# Kept on disk and outside the repository (root .gitignore); its scripts are not this repo's to format.
+assets
+# Drafts of upstream contributions, written in the target repo's own style (mppx: single quotes, no semicolons).
+contrib

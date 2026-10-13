@@ -1,0 +1,20 @@
+[
+  {
+    "status": 200,
+    "body": {
+      "id": "gen-fixture-child-1",
+      "model": "anthropic/claude-haiku-4.5",
+      "choices": [
+        {
+          "index": 0,
+          "finish_reason": "stop",
+          "message": {
+            "role": "assistant",
+            "content": "Three governance votes in the window; all three passed."
+          }
+        }
+      ],
+      "usage": { "prompt_tokens": 210, "completion_tokens": 19, "total_tokens": 229, "cost": 0.00011 }
+    }
+  }
+]

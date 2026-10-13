@@ -1,0 +1,4 @@
+# Cargo features for the Lath build, one per line. `lath` (patch 0002) is the one-shot agent over
+# one custom provider, with channels, eval, the gateway and the WASM host out of the graph; it is a
+# compile error beside any feature that would put them back.
+lath

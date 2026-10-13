@@ -1,0 +1,88 @@
+From 2f0ffd8791c83f3dbeeb3928260fb26a9e602fb7 Mon Sep 17 00:00:00 2001
+From: Lath <lath.solana@gmail.com>
+Date: Thu, 24 Sep 2026 18:07:13 -0300
+Subject: [PATCH 6/6] log: flush the runtime trace before a one-shot run exits
+
+The trace writer is a bounded queue drained by a background thread, so a short run could return from main before its last records reached the file. zeroclaw_log::flush drains the queue and syncs the active file (flush_for_test now calls it), and the Lath agent path initialises the trace under <config dir>/data and flushes it on the way out, failing the step if the trace could not be written.
+---
+ crates/zeroclaw-log/src/lib.rs    |  2 +-
+ crates/zeroclaw-log/src/writer.rs | 13 +++++++++++++
+ src/lath.rs                       | 18 ++++++++++++++++--
+ 3 files changed, 30 insertions(+), 3 deletions(-)
+
+diff --git a/crates/zeroclaw-log/src/lib.rs b/crates/zeroclaw-log/src/lib.rs
+index 0ae1b1a..8b665ca 100644
+--- a/crates/zeroclaw-log/src/lib.rs
++++ b/crates/zeroclaw-log/src/lib.rs
+@@ -74,7 +74,7 @@ pub use subscriber::{
+ };
+ pub use tool_io::{ToolIoCapture, capture_llm_request, capture_tool_input, capture_tool_output};
+ pub use writer::{
+-    active_log_path, active_log_query_scope, flush_for_test, init_from_config,
++    active_log_path, active_log_query_scope, flush, flush_for_test, init_from_config,
+     llm_request_payload_policy, record_event, runtime_trace_path,
+ };
+ 
+diff --git a/crates/zeroclaw-log/src/writer.rs b/crates/zeroclaw-log/src/writer.rs
+index 3556b54..4e9e9b0 100644
+--- a/crates/zeroclaw-log/src/writer.rs
++++ b/crates/zeroclaw-log/src/writer.rs
+@@ -504,6 +504,19 @@ pub fn active_log_query_scope() -> Option<(PathBuf, bool)> {
+ }
+ 
+ pub fn flush_for_test() -> Result<()> {
++    flush()
++}
++
++/// Block until every event recorded so far is on disk: the worker drains its
++/// queue, writes each event and syncs the active file before answering.
++///
++/// The writer is a bounded, lossy queue drained by a background thread, which
++/// is right for a daemon and wrong for a one-shot process: `main` returning
++/// ends the process whether or not the worker has caught up, so the last
++/// events of a short run — its last tool call, its final answer — can be
++/// lost. A one-shot caller calls this before it exits. A no-op when no writer
++/// is installed or persistence is off; an error when the worker has died.
++pub fn flush() -> Result<()> {
+     let Some(state) = current_state() else {
+         return Ok(());
+     };
+diff --git a/src/lath.rs b/src/lath.rs
+index 9566c52..c430bda 100644
+--- a/src/lath.rs
++++ b/src/lath.rs
+@@ -84,7 +84,14 @@ pub async fn run_agent(config: Config, args: AgentArgs) -> Result<()> {
+         model,
+         ..
+     } = args;
+-    Box::pin(zeroclaw_runtime::agent::loop_::run(
++
++    // The runtime trace goes under `<config dir>/data`, one per step; it is
++    // kept as a blob beside the host's own record of the step.
++    zeroclaw_runtime::observability::runtime_trace::init_from_config(
++        &config.observability,
++        &config.data_dir,
++    );
++    let outcome = Box::pin(zeroclaw_runtime::agent::loop_::run(
+         config,
+         &agent,
+         message,
+@@ -99,7 +106,14 @@ pub async fn run_agent(config: Config, args: AgentArgs) -> Result<()> {
+         zeroclaw_runtime::agent::loop_::AgentRunOverrides::default(),
+     ))
+     .await
+-    .map(|_| ())
++    .map(|_| ());
++
++    // The trace writer is a queue drained by a background thread; returning
++    // from `main` ends the process whether or not it has caught up, which on
++    // a one-shot run loses exactly the last records. Drain it first, on the
++    // failure path too, and fail a step whose trace could not be written.
++    let flushed = zeroclaw_log::flush().context("lath: flushing the runtime trace");
++    outcome.and(flushed)
+ }
+ 
+ /// The eight tool names a Lath posture may allow.
+-- 
+2.50.1 (Apple Git-155)
+

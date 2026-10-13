@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48">
+  <!-- The Lath delta: four laths, one per record, newest on top (light) and oldest at the base (blue). -->
+  <rect x="19" y="6" width="10" height="6" rx="1.5" fill="#bfefff"/>
+  <rect x="14" y="16" width="20" height="6" rx="1.5" fill="#7fdcff"/>
+  <rect x="9" y="26" width="30" height="6" rx="1.5" fill="#56a9fa"/>
+  <rect x="4" y="36" width="40" height="6" rx="1.5" fill="#2f7cf6"/>
+</svg>

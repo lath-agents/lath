@@ -1,0 +1,1172 @@
+From bd6be956c6d3e8dcbbee25ac60cd01d3ca8cdc21 Mon Sep 17 00:00:00 2001
+From: Lath <lath.solana@gmail.com>
+Date: Thu, 24 Sep 2026 17:41:41 -0300
+Subject: [PATCH 4/6] tools: the Lath registry, eight tools and no network
+ module
+
+Under the lath feature every registry is the Lath one: file_read and file_write, guarded as the full registry guards them, and six host tools (store_get, store_set, solana_slot, solana_fees, solana_balance, lath_verify_chain) as thin clients of one HTTP/1.1 listener on the Unix socket in the new [lath] section, POST /tools/<tool id> with the step's bearer. Descriptions and parameters are the Lath definitions verbatim. assemble skips peripherals, the pipeline, MCP and skills, the run path refuses any other name after assembly, and the tool modules that open a network connection or drive a browser are not compiled. With the feature off only the ignored [lath] section is new.
+---
+ crates/zeroclaw-config/src/schema.rs          |  35 ++
+ crates/zeroclaw-runtime/src/agent/loop_.rs    |  16 +
+ .../src/agent/tool_execution.rs               |   3 +
+ .../zeroclaw-runtime/src/tools/lath_host.rs   | 445 ++++++++++++++++++
+ crates/zeroclaw-runtime/src/tools/mod.rs      |  82 +++-
+ crates/zeroclaw-runtime/src/tools/scoped.rs   |  11 +-
+ crates/zeroclaw-tools/src/attribution.rs      |  40 ++
+ .../src/helpers/domain_guard.rs               |   2 +
+ crates/zeroclaw-tools/src/lib.rs              |  30 ++
+ 9 files changed, 662 insertions(+), 2 deletions(-)
+ create mode 100644 crates/zeroclaw-runtime/src/tools/lath_host.rs
+
+diff --git a/crates/zeroclaw-config/src/schema.rs b/crates/zeroclaw-config/src/schema.rs
+index e03f41b..a1f0af0 100644
+--- a/crates/zeroclaw-config/src/schema.rs
++++ b/crates/zeroclaw-config/src/schema.rs
+@@ -657,6 +657,14 @@ pub struct Config {
+     #[group = "Agent"]
+     pub verifiable_intent: VerifiableIntentConfig,
+ 
++    /// The Lath build's host-tool socket (`[lath]`). Read only by a binary
++    /// built with the `lath` feature, which sends its host tools there;
++    /// every other build ignores the section.
++    #[serde(default)]
++    #[nested]
++    #[group = "Integrations"]
++    pub lath: LathConfig,
++
+     /// Claude Code tool configuration (`[claude_code]`).
+     #[serde(default)]
+     #[nested]
+@@ -5823,6 +5831,30 @@ fn default_vi_strictness() -> String {
+     "strict".to_owned()
+ }
+ 
++/// Where the Lath build's host tools are served (`[lath]` section).
++///
++/// A binary built with the `lath` feature registers six host tools
++/// (`store_get`, `store_set`, `solana_slot`, `solana_fees`, `solana_balance`,
++/// `lath_verify_chain`) as thin clients of one HTTP/1.1 listener on a Unix
++/// socket the host created for the step: each call is a
++/// `POST /tools/<tool id>` with the step's bearer token and the model's
++/// arguments as the body. Other builds ignore this section.
++#[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
++#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
++#[prefix = "lath"]
++pub struct LathConfig {
++    /// Absolute path of the host-tool socket (`t.sock` in the step's
++    /// directory).
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub tools_socket: Option<String>,
++    /// Bearer token the host-tool listener accepts for this step.
++    #[secret]
++    #[credential_class = "encrypted_secret"]
++    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub tools_token: Option<String>,
++}
++
+ impl Default for VerifiableIntentConfig {
+     fn default() -> Self {
+         Self {
+@@ -20875,6 +20907,7 @@ impl Default for Config {
+             plugins: PluginsConfig::default(),
+             locale: None,
+             verifiable_intent: VerifiableIntentConfig::default(),
++            lath: LathConfig::default(),
+             claude_code: ClaudeCodeConfig::default(),
+             claude_code_runner: ClaudeCodeRunnerConfig::default(),
+             codex_cli: CodexCliConfig::default(),
+@@ -31873,6 +31906,7 @@ auto_save = true
+             plugins: PluginsConfig::default(),
+             locale: None,
+             verifiable_intent: VerifiableIntentConfig::default(),
++            lath: LathConfig::default(),
+             claude_code: ClaudeCodeConfig::default(),
+             claude_code_runner: ClaudeCodeRunnerConfig::default(),
+             codex_cli: CodexCliConfig::default(),
+@@ -33113,6 +33147,7 @@ default_temperature = 0.7
+             plugins: PluginsConfig::default(),
+             locale: None,
+             verifiable_intent: VerifiableIntentConfig::default(),
++            lath: LathConfig::default(),
+             claude_code: ClaudeCodeConfig::default(),
+             claude_code_runner: ClaudeCodeRunnerConfig::default(),
+             codex_cli: CodexCliConfig::default(),
+diff --git a/crates/zeroclaw-runtime/src/agent/loop_.rs b/crates/zeroclaw-runtime/src/agent/loop_.rs
+index 53f6879..4519f6f 100644
+--- a/crates/zeroclaw-runtime/src/agent/loop_.rs
++++ b/crates/zeroclaw-runtime/src/agent/loop_.rs
+@@ -1463,6 +1463,22 @@ pub async fn run(
+         // (coerces to `&[Box<dyn Tool>]` at the leaf call sites via `Deref`).
+         let tools_registry = registry;
+ 
++        // The Lath build runs with the eight Lath tools or fewer, never another:
++        // a name outside them after assembly is a stop, not a warning. The
++        // record carries the exact list the model will be offered.
++        #[cfg(feature = "lath")]
++        {
++            let names: Vec<&str> = tools_registry.iter().map(|t| t.name()).collect();
++            ::zeroclaw_log::record!(
++                INFO,
++                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Load)
++                    .with_category(::zeroclaw_log::EventCategory::Tool)
++                    .with_attrs(::serde_json::json!({"agent_alias": agent_alias, "tools": names})),
++                "Lath registry assembled"
++            );
++            tools::lath_host::check_registry(names)?;
++        }
++
+         // Populate all channel-driven tool handles from the registered factory.
+         let count = seed_channel_handles(
+             &ask_user_handle,
+diff --git a/crates/zeroclaw-runtime/src/agent/tool_execution.rs b/crates/zeroclaw-runtime/src/agent/tool_execution.rs
+index 3db0401..f7a5ef5 100644
+--- a/crates/zeroclaw-runtime/src/agent/tool_execution.rs
++++ b/crates/zeroclaw-runtime/src/agent/tool_execution.rs
+@@ -1003,6 +1003,8 @@ mod tests {
+     /// agent-visible outcome rather than being replaced by the bare
+     /// `"HTTP 400"` `error`. Mirrors the real-world Azure DevOps repro from
+     /// the issue (a `-preview` api-version 400 response).
++    // `http_request` is not compiled in the Lath build.
++    #[cfg(not(feature = "lath"))]
+     #[tokio::test]
+     async fn execute_one_tool_preserves_http_request_400_body_from_real_producer() {
+         use tokio::io::{AsyncReadExt, AsyncWriteExt};
+@@ -1797,6 +1799,7 @@ mod tests {
+     /// model-visible outcome; the actionable message must; and the structured
+     /// `output_data` (which never reaches the model) deliberately keeps the
+     /// raw parsed body for trusted consumers.
++    #[cfg(not(feature = "lath"))]
+     #[tokio::test]
+     async fn execute_one_tool_real_http_request_scrubs_credential_in_400_body() {
+         use tokio::io::{AsyncReadExt, AsyncWriteExt};
+diff --git a/crates/zeroclaw-runtime/src/tools/lath_host.rs b/crates/zeroclaw-runtime/src/tools/lath_host.rs
+new file mode 100644
+index 0000000..704a07e
+--- /dev/null
++++ b/crates/zeroclaw-runtime/src/tools/lath_host.rs
+@@ -0,0 +1,445 @@
++//! The Lath registry: every tool a binary built with the `lath` feature can
++//! offer a model, and nothing else.
++//!
++//! Eight tools. Two are ZeroClaw's own and run in the process, inside the
++//! agent's workspace: `file_read` and `file_write`. Six are the Lath host's,
++//! compiled in as thin clients of one HTTP/1.1 listener on a Unix socket the
++//! host created for the step (`[lath] tools_socket`): `store_get`,
++//! `store_set`, `solana_slot`, `solana_fees`, `solana_balance` and
++//! `lath_verify_chain`. The host runs each call through the same code path an
++//! in-process Lath tool call takes, and records it on its chain.
++//!
++//! The wire names are the ones the Lath runtime already sends for these tool
++//! ids (a dot becomes `_`), and each description and parameter schema is
++//! copied verbatim from the Lath definitions, so the model sees the same spec
++//! whether a step runs in the sandbox or not. A Lath-side test compares them.
++//!
++//! The protocol (Lath `zeroclaw/CONTRACT.md` §3): `POST /tools/<tool id>` with
++//! `Authorization: Bearer <tools_token>` and the model's arguments as the
++//! JSON body. `200 {"result": …}` is a successful result, `404`/`500
++//! {"error": …}` a failed one the model sees, and anything else (a `401`, an
++//! unexpected status, a transport failure) an error of the call itself.
++
++use std::path::Path;
++use std::sync::Arc;
++
++use anyhow::{Context, Result, bail};
++use async_trait::async_trait;
++use serde_json::Value;
++use zeroclaw_api::attribution::ToolKind;
++use zeroclaw_api::tool::ToolOutput;
++use zeroclaw_api::tool_attribution;
++
++use crate::platform::RuntimeAdapter;
++use crate::security::SecurityPolicy;
++use crate::tools::{
++    AllToolsResult, FileReadTool, FileWriteTool, PathGuardedTool, RateLimitedTool, Tool, ToolResult,
++};
++
++/// ZeroClaw's own tools in the Lath registry, run in-process.
++pub const LATH_FILE_TOOLS: [&str; 2] = ["file_read", "file_write"];
++
++/// One host tool: the name the model calls, the id the host records, and the
++/// spec the model is shown.
++#[derive(Debug, Clone, Copy)]
++pub struct HostToolDef {
++    /// The name the model sees and calls (`store_get`).
++    pub wire_name: &'static str,
++    /// The dotted Lath tool id, and the request path (`store.get`).
++    pub id: &'static str,
++    /// Verbatim from the Lath definition.
++    pub description: &'static str,
++    /// Verbatim from the Lath definition, as JSON text. A Lath tool with no
++    /// `parameters` is sent as an empty object schema, as the Lath runtime
++    /// sends it.
++    pub parameters: &'static str,
++}
++
++/// The six host tools, in the order the Lath contract lists them.
++pub const LATH_HOST_TOOLS: [HostToolDef; 6] = [
++    HostToolDef {
++        wire_name: "store_get",
++        id: "store.get",
++        description: "Reads your key-value store, which persists across sessions and loop steps and which your owner can also write. Pass key to read one value; omit it to list every key.",
++        parameters: r#"{"type":"object","properties":{"key":{"type":"string"}}}"#,
++    },
++    HostToolDef {
++        wire_name: "store_set",
++        id: "store.set",
++        description: "Writes a value under a key in your store, on chain. Public: anyone can read it. Keys are 1–64 of A-Z a-z 0-9 . _ : - ; values are text up to 1024 bytes. Each write costs a chain transaction, so write what should outlast this run, not scratch work.",
++        parameters: r#"{"type":"object","properties":{"key":{"type":"string"},"value":{"type":"string"}},"required":["key","value"]}"#,
++    },
++    HostToolDef {
++        wire_name: "solana_slot",
++        id: "solana.slot",
++        description: "The cluster's current slot and block time.",
++        parameters: r#"{"type":"object","properties":{}}"#,
++    },
++    HostToolDef {
++        wire_name: "solana_fees",
++        id: "solana.fees",
++        description: "Recent prioritization fees, so a write can be priced.",
++        parameters: r#"{"type":"object","properties":{}}"#,
++    },
++    HostToolDef {
++        wire_name: "solana_balance",
++        id: "solana.balance",
++        description: "Lamports held by an address.",
++        parameters: r#"{"type":"object","properties":{"address":{"type":"string"}},"required":["address"]}"#,
++    },
++    HostToolDef {
++        wire_name: "lath_verify_chain",
++        id: "lath.verify_chain",
++        description: "Replays a hash chain from the indexer and reports whether it holds, plus any records of it still anchoring. Defaults to your own chain; pass agentId to verify another agent's.",
++        parameters: r#"{"type":"object","properties":{"agentId":{"type":"string"}}}"#,
++    },
++];
++
++/// Every name the Lath registry can hold: the two file tools, then the six
++/// host tools.
++pub fn lath_tool_names() -> impl Iterator<Item = &'static str> {
++    LATH_FILE_TOOLS
++        .into_iter()
++        .chain(LATH_HOST_TOOLS.iter().map(|t| t.wire_name))
++}
++
++/// Whether `name` is one of the eight.
++pub fn is_lath_tool(name: &str) -> bool {
++    lath_tool_names().any(|n| n == name)
++}
++
++/// Refuse a registry that holds any name outside the eight.
++///
++/// Run on the assembled registry, after every stage that could add a tool
++/// (peripherals, pipeline, MCP, skills), so a tool that reaches the model by
++/// a path this module does not know about stops the run instead.
++pub fn check_registry<'a>(names: impl IntoIterator<Item = &'a str>) -> Result<()> {
++    for name in names {
++        if !is_lath_tool(name) {
++            bail!(
++                "lath: refused tool `{name}` in the assembled registry: the Lath build offers \
++                 only {}",
++                lath_tool_names().collect::<Vec<_>>().join(", ")
++            );
++        }
++    }
++    Ok(())
++}
++
++/// The client every host tool shares: one HTTP/1.1 client bound to the
++/// step's tools socket, and the step's token.
++#[derive(Clone)]
++pub struct HostToolsClient {
++    client: reqwest::Client,
++    token: String,
++}
++
++impl HostToolsClient {
++    /// Build the client for an absolute socket path and a non-empty token.
++    ///
++    /// Like the provider's socket client, it ignores `HTTP_PROXY` and friends,
++    /// follows no redirect and resolves no name: reqwest sends every
++    /// connection to the socket whatever host the URL names.
++    pub fn connect(socket: &Path, token: &str) -> Result<Self> {
++        if !socket.is_absolute() {
++            bail!(
++                "lath: refused `lath.tools_socket = \"{}\"`: the socket path must be absolute",
++                socket.display()
++            );
++        }
++        if token.trim().is_empty() {
++            bail!(
++                "lath: `lath.tools_token` is required: the host tool listener needs the step's token"
++            );
++        }
++        Ok(Self {
++            client: Self::client(socket)?,
++            token: token.to_string(),
++        })
++    }
++
++    #[cfg(unix)]
++    fn client(socket: &Path) -> Result<reqwest::Client> {
++        reqwest::Client::builder()
++            .no_proxy()
++            .redirect(reqwest::redirect::Policy::none())
++            .connect_timeout(std::time::Duration::from_secs(10))
++            .timeout(std::time::Duration::from_secs(120))
++            .unix_socket(socket.to_path_buf())
++            .build()
++            .context("lath: building the host-tool socket client")
++    }
++
++    #[cfg(not(unix))]
++    fn client(socket: &Path) -> Result<reqwest::Client> {
++        bail!(
++            "lath: `lath.tools_socket = \"{}\"` needs a Unix platform",
++            socket.display()
++        )
++    }
++
++    /// Call host tool `id` with the model's arguments.
++    pub async fn call(&self, id: &str, args: &Value) -> Result<ToolResult> {
++        let response = self
++            .client
++            .post(format!("http://localhost/tools/{id}"))
++            .bearer_auth(&self.token)
++            .json(args)
++            .send()
++            .await
++            .with_context(|| format!("lath: host tool `{id}`: the tools socket did not answer"))?;
++        let status = response.status().as_u16();
++        let body = response
++            .bytes()
++            .await
++            .with_context(|| format!("lath: host tool `{id}`: reading the answer"))?;
++        interpret(id, status, &body)
++    }
++}
++
++/// Map one host answer onto a tool result, per the contract.
++fn interpret(id: &str, status: u16, body: &[u8]) -> Result<ToolResult> {
++    match status {
++        200 => {
++            let answer: Value = serde_json::from_slice(body)
++                .with_context(|| format!("lath: host tool `{id}`: the 200 body is not JSON"))?;
++            let Some(result) = answer.get("result") else {
++                bail!("lath: host tool `{id}`: the 200 body has no `result`");
++            };
++            // Compact, as the Lath runtime renders an in-process tool result.
++            let text = serde_json::to_string(result)?;
++            Ok(ToolResult::ok(ToolOutput::json_with_text(
++                result.clone(),
++                text,
++            )))
++        }
++        404 | 500 => {
++            let text = serde_json::from_slice::<Value>(body)
++                .ok()
++                .and_then(|v| v.get("error").and_then(Value::as_str).map(str::to_string))
++                .unwrap_or_else(|| String::from_utf8_lossy(body).into_owned());
++            Ok(ToolResult::err(text))
++        }
++        401 => bail!("lath: host tool `{id}`: the host refused this step's token (401)"),
++        other => bail!("lath: host tool `{id}`: unexpected status {other}"),
++    }
++}
++
++/// One host tool, as the model sees it.
++pub struct LathHostTool {
++    def: HostToolDef,
++    client: Arc<HostToolsClient>,
++}
++
++tool_attribution!(LathHostTool, ToolKind::Plugin);
++
++#[async_trait]
++impl Tool for LathHostTool {
++    fn name(&self) -> &str {
++        self.def.wire_name
++    }
++
++    fn description(&self) -> &str {
++        self.def.description
++    }
++
++    fn parameters_schema(&self) -> Value {
++        serde_json::from_str(self.def.parameters).expect("host tool parameters are JSON")
++    }
++
++    async fn execute(&self, args: Value) -> Result<ToolResult> {
++        self.client.call(self.def.id, &args).await
++    }
++}
++
++/// Build the Lath registry for `config`: the two file tools, guarded exactly
++/// as the full registry guards them, and the six host tools on
++/// `[lath] tools_socket`. The per-agent `allowed_tools` filter is applied
++/// afterwards by `ScopedToolRegistry::assemble`, as for every registry.
++pub fn lath_registry(
++    config: &zeroclaw_config::schema::Config,
++    security: &Arc<SecurityPolicy>,
++    runtime: &Arc<dyn RuntimeAdapter>,
++) -> Result<AllToolsResult> {
++    let socket = config
++        .lath
++        .tools_socket
++        .as_deref()
++        .map(str::trim)
++        .filter(|s| !s.is_empty())
++        .context(
++            "lath: `lath.tools_socket` is required: the Lath build serves its host tools there",
++        )?;
++    let token = config.lath.tools_token.as_deref().unwrap_or_default();
++    let client = Arc::new(HostToolsClient::connect(Path::new(socket), token)?);
++
++    let persistent_writes = runtime.has_filesystem_access();
++    let mut tools: Vec<Box<dyn Tool>> = vec![
++        Box::new(RateLimitedTool::new(
++            PathGuardedTool::new(
++                FileReadTool::new_with_persistence(security.clone(), persistent_writes),
++                security.clone(),
++            ),
++            security.clone(),
++        )),
++        Box::new(RateLimitedTool::new(
++            PathGuardedTool::new(
++                FileWriteTool::new_with_persistence(security.clone(), persistent_writes),
++                security.clone(),
++            ),
++            security.clone(),
++        )),
++    ];
++    for def in LATH_HOST_TOOLS {
++        tools.push(Box::new(LathHostTool {
++            def,
++            client: Arc::clone(&client),
++        }));
++    }
++    check_registry(tools.iter().map(|t| t.name()))?;
++    Ok(AllToolsResult::from_prebuilt_tools(tools))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn the_registry_names_are_exactly_the_eight() {
++        let names: Vec<_> = lath_tool_names().collect();
++        assert_eq!(
++            names,
++            [
++                "file_read",
++                "file_write",
++                "store_get",
++                "store_set",
++                "solana_slot",
++                "solana_fees",
++                "solana_balance",
++                "lath_verify_chain",
++            ]
++        );
++    }
++
++    #[test]
++    fn wire_names_are_the_ids_with_dots_as_underscores() {
++        for def in LATH_HOST_TOOLS {
++            assert_eq!(def.wire_name, def.id.replace('.', "_"));
++        }
++    }
++
++    #[test]
++    fn every_parameter_schema_is_an_object_schema() {
++        for def in LATH_HOST_TOOLS {
++            let schema: Value = serde_json::from_str(def.parameters).unwrap();
++            assert_eq!(schema["type"], "object", "{}", def.id);
++            assert!(schema["properties"].is_object(), "{}", def.id);
++        }
++    }
++
++    #[test]
++    fn a_name_outside_the_eight_is_refused_by_name() {
++        for name in [
++            "shell",
++            "http_request",
++            "web_fetch",
++            "github__create_issue",
++            "lattice_verify_chain",
++        ] {
++            let err = check_registry(["file_read", name]).unwrap_err().to_string();
++            assert!(err.contains(&format!("`{name}`")), "{err}");
++        }
++        check_registry(lath_tool_names()).unwrap();
++    }
++
++    #[test]
++    fn a_relative_tools_socket_is_refused() {
++        let err = HostToolsClient::connect(Path::new("t.sock"), "tok")
++            .err()
++            .unwrap()
++            .to_string();
++        assert!(err.contains("t.sock"), "{err}");
++    }
++
++    #[test]
++    fn an_empty_token_is_refused() {
++        let err = HostToolsClient::connect(Path::new("/tmp/t.sock"), " ")
++            .err()
++            .unwrap()
++            .to_string();
++        assert!(err.contains("tools_token"), "{err}");
++    }
++
++    #[test]
++    fn answers_map_onto_results_per_the_contract() {
++        let ok = interpret("store.get", 200, br#"{"result":{"found":false}}"#).unwrap();
++        assert!(ok.success);
++        assert_eq!(ok.output.data(), Some(&serde_json::json!({"found": false})));
++        assert_eq!(ok.output.as_str(), r#"{"found":false}"#);
++
++        let missing = interpret("store.get", 404, br#"{"error":"no such key"}"#).unwrap();
++        assert!(!missing.success);
++        assert_eq!(missing.error.as_deref(), Some("no such key"));
++
++        let failed = interpret("solana.slot", 500, br#"{"error":"rpc down"}"#).unwrap();
++        assert_eq!(failed.error.as_deref(), Some("rpc down"));
++
++        for (status, body) in [
++            (401, &b"{}"[..]),
++            (418, &b"{}"[..]),
++            (200, &b"{}"[..]),
++            (200, &b"not json"[..]),
++        ] {
++            assert!(interpret("store.get", status, body).is_err(), "{status}");
++        }
++    }
++
++    #[tokio::test]
++    #[cfg(unix)]
++    async fn a_host_tool_call_round_trips_over_the_socket() {
++        use tokio::io::{AsyncReadExt, AsyncWriteExt};
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("t.sock");
++        let listener = tokio::net::UnixListener::bind(&path).unwrap();
++        let server = tokio::spawn(async move {
++            let (mut stream, _) = listener.accept().await.unwrap();
++            let mut raw = Vec::new();
++            let mut buf = [0u8; 4096];
++            loop {
++                let n = stream.read(&mut buf).await.unwrap();
++                raw.extend_from_slice(&buf[..n]);
++                let text = String::from_utf8_lossy(&raw).to_string();
++                if let Some(end) = text.find("\r\n\r\n")
++                    && text[end + 4..].ends_with('}')
++                {
++                    break;
++                }
++                if n == 0 {
++                    break;
++                }
++            }
++            let body = r#"{"result":{"key":"k","found":true,"value":"v"}}"#;
++            let answer = format!(
++                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
++                body.len()
++            );
++            stream.write_all(answer.as_bytes()).await.unwrap();
++            String::from_utf8_lossy(&raw).into_owned()
++        });
++        let client = Arc::new(HostToolsClient::connect(&path, "step-token").unwrap());
++        let tool = LathHostTool {
++            def: LATH_HOST_TOOLS[0],
++            client,
++        };
++        let result = tool.execute(serde_json::json!({"key": "k"})).await.unwrap();
++        assert!(result.success);
++        let request = server.await.unwrap();
++        assert!(
++            request.starts_with("POST /tools/store.get HTTP/1.1\r\n"),
++            "{request}"
++        );
++        assert!(request.contains("Bearer step-token"), "{request}");
++        assert!(request.ends_with(r#"{"key":"k"}"#), "{request}");
++    }
++}
+diff --git a/crates/zeroclaw-runtime/src/tools/mod.rs b/crates/zeroclaw-runtime/src/tools/mod.rs
+index 3957840..1ef65c8 100644
+--- a/crates/zeroclaw-runtime/src/tools/mod.rs
++++ b/crates/zeroclaw-runtime/src/tools/mod.rs
+@@ -1,6 +1,9 @@
+ //! Tool subsystem for agent-callable capabilities.
+ 
+ pub mod attribution;
++// Items marked `allow(dead_code)` under `lath` serve only the full registry
++// builder, which the Lath build replaces with `lath_host::lath_registry`.
++#[cfg_attr(feature = "lath", allow(dead_code))]
+ pub(crate) mod coding_cli_executor;
+ pub mod cron_add;
+ pub(crate) mod cron_common;
+@@ -12,6 +15,8 @@ pub mod cron_update;
+ pub mod delegate;
+ pub mod deliver_file;
+ pub mod file_read;
++#[cfg(feature = "lath")]
++pub mod lath_host;
+ pub mod model_switch;
+ pub mod param_options;
+ pub mod read_skill;
+@@ -36,15 +41,21 @@ pub mod spawn_subagent;
+ pub mod todo_write;
+ pub mod verifiable_intent;
+ 
+-// Tool types from zeroclaw-tools (direct imports, no shims)
++// Tool types from zeroclaw-tools (direct imports, no shims). The ones marked
++// `not(feature = "lath")` open a network connection or drive a browser, and
++// the Lath build does not compile their modules (see `lath_host`).
++#[cfg(not(feature = "lath"))]
+ pub use zeroclaw_tools::a2a_client::{
+     A2aCancelTool, A2aDiscoverTool, A2aGetTaskTool, A2aHttpClient, A2aSendTool,
+ };
+ pub use zeroclaw_tools::ask_user::AskUserTool;
+ pub use zeroclaw_tools::ask_user::ChannelMapHandle;
+ pub use zeroclaw_tools::backup_tool::BackupTool;
++#[cfg(not(feature = "lath"))]
+ pub use zeroclaw_tools::browser::{BrowserTool, ComputerUseConfig};
++#[cfg(not(feature = "lath"))]
+ pub use zeroclaw_tools::browser_delegate::BrowserDelegateTool;
++#[cfg(not(feature = "lath"))]
+ pub use zeroclaw_tools::browser_open::BrowserOpenTool;
+ pub use zeroclaw_tools::calculator::CalculatorTool;
+ pub use zeroclaw_tools::canvas::{ALLOWED_CONTENT_TYPES, MAX_CONTENT_SIZE};
+@@ -56,31 +67,43 @@ pub use zeroclaw_tools::cli_discovery::{DiscoveredCli, discover_cli_tools};
+ pub use zeroclaw_tools::cloud_ops::CloudOpsTool;
+ pub use zeroclaw_tools::cloud_patterns::CloudPatternsTool;
+ pub use zeroclaw_tools::codex_cli::CodexCliTool;
++#[cfg(not(feature = "lath"))]
+ pub use zeroclaw_tools::composio::ComposioTool;
+ pub use zeroclaw_tools::content_search::ContentSearchTool;
+ pub use zeroclaw_tools::data_management::DataManagementTool;
++#[cfg(not(feature = "lath"))]
+ pub use zeroclaw_tools::discord_search::DiscordSearchTool;
++#[cfg(not(feature = "lath"))]
+ pub use zeroclaw_tools::email_read::EmailReadTool;
++#[cfg(not(feature = "lath"))]
+ pub use zeroclaw_tools::email_search::EmailSearchTool;
+ pub use zeroclaw_tools::escalate::EscalateToHumanTool;
++#[cfg(not(feature = "lath"))]
+ pub use zeroclaw_tools::file_download::FileDownloadTool;
+ pub use zeroclaw_tools::file_edit::FileEditTool;
++#[cfg(not(feature = "lath"))]
+ pub use zeroclaw_tools::file_upload::FileUploadTool;
++#[cfg(not(feature = "lath"))]
+ pub use zeroclaw_tools::file_upload_bundle::FileUploadBundleTool;
+ pub use zeroclaw_tools::file_write::FileWriteTool;
+ pub use zeroclaw_tools::gemini_cli::GeminiCliTool;
+ pub use zeroclaw_tools::git_forge::GitForgeTool;
+ pub use zeroclaw_tools::git_operations::{GitCommandBoundary, GitOperationsTool};
+ pub use zeroclaw_tools::glob_search::GlobSearchTool;
++#[cfg(not(feature = "lath"))]
+ pub use zeroclaw_tools::google_workspace::GoogleWorkspaceTool;
+ pub use zeroclaw_tools::hardware_board_info::HardwareBoardInfoTool;
+ pub use zeroclaw_tools::hardware_memory_map::HardwareMemoryMapTool;
+ pub use zeroclaw_tools::hardware_memory_read::HardwareMemoryReadTool;
++#[cfg(not(feature = "lath"))]
+ pub use zeroclaw_tools::http_request::HttpRequestTool;
++#[cfg(not(feature = "lath"))]
+ pub use zeroclaw_tools::image_gen::ImageGenTool;
+ pub use zeroclaw_tools::image_info::ImageInfoTool;
++#[cfg(not(feature = "lath"))]
+ pub use zeroclaw_tools::jira_tool::JiraTool;
+ pub use zeroclaw_tools::knowledge_tool::KnowledgeTool;
++#[cfg(not(feature = "lath"))]
+ pub use zeroclaw_tools::linkedin::LinkedInTool;
+ pub use zeroclaw_tools::llm_task::LlmTaskTool;
+ pub use zeroclaw_tools::mcp_client::{McpRegistry, McpServer};
+@@ -97,14 +120,17 @@ pub use zeroclaw_tools::memory_forget::MemoryForgetTool;
+ pub use zeroclaw_tools::memory_purge::MemoryPurgeTool;
+ pub use zeroclaw_tools::memory_recall::MemoryRecallTool;
+ pub use zeroclaw_tools::memory_store::MemoryStoreTool;
++#[cfg(not(feature = "lath"))]
+ pub use zeroclaw_tools::microsoft365::Microsoft365Tool;
+ pub use zeroclaw_tools::model_routing_config::ModelRoutingConfigTool;
++#[cfg(not(feature = "lath"))]
+ pub use zeroclaw_tools::notion_tool::NotionTool;
+ pub use zeroclaw_tools::opencode_cli::OpenCodeCliTool;
+ pub use zeroclaw_tools::pipeline::PipelineTool;
+ pub use zeroclaw_tools::poll::PollTool;
+ pub use zeroclaw_tools::project_intel::ProjectIntelTool;
+ pub use zeroclaw_tools::proxy_config::ProxyConfigTool;
++#[cfg(not(feature = "lath"))]
+ pub use zeroclaw_tools::pushover::PushoverTool;
+ pub use zeroclaw_tools::reaction::ReactionTool;
+ pub use zeroclaw_tools::report_template_tool::ReportTemplateTool;
+@@ -116,10 +142,14 @@ pub use zeroclaw_tools::sessions::{
+     AcpSessionReadView, SessionDeleteTool, SessionResetTool, SessionsCurrentTool,
+     SessionsHistoryTool, SessionsListTool, SessionsSendTool,
+ };
++#[cfg(not(feature = "lath"))]
+ pub use zeroclaw_tools::text_browser::TextBrowserTool;
+ pub use zeroclaw_tools::tool_search::ToolSearchTool;
++#[cfg(not(feature = "lath"))]
+ pub use zeroclaw_tools::weather_tool::WeatherTool;
++#[cfg(not(feature = "lath"))]
+ pub use zeroclaw_tools::web_fetch::WebFetchTool;
++#[cfg(not(feature = "lath"))]
+ pub use zeroclaw_tools::web_search_tool::WebSearchTool;
+ pub use zeroclaw_tools::wrappers::{PathGuardedTool, RateLimitedTool};
+ 
+@@ -232,12 +262,14 @@ impl Tool for ArcToolRef {
+ /// active, in which case the tool keeps resolving `[web_search] serply_api_key`
+ /// from `config.toml` at use time so rotation and removal take effect without a
+ /// restart.
++#[cfg_attr(feature = "lath", allow(dead_code))]
+ fn serply_api_key_override(root_config: &Config) -> Option<Option<String>> {
+     root_config
+         .prop_is_env_overridden("web_search.serply_api_key")
+         .then(|| root_config.web_search.serply_api_key.clone())
+ }
+ 
++#[cfg_attr(feature = "lath", allow(dead_code))]
+ fn any_coding_cli_tool_enabled(root_config: &Config) -> bool {
+     root_config.claude_code.enabled
+         || root_config.codex_cli.enabled
+@@ -245,11 +277,13 @@ fn any_coding_cli_tool_enabled(root_config: &Config) -> bool {
+         || root_config.opencode_cli.enabled
+ }
+ 
++#[cfg_attr(feature = "lath", allow(dead_code))]
+ #[derive(Clone)]
+ struct ArcDelegatingTool {
+     inner: Arc<dyn Tool>,
+ }
+ 
++#[cfg_attr(feature = "lath", allow(dead_code))]
+ impl ArcDelegatingTool {
+     fn boxed(inner: Arc<dyn Tool>) -> Box<dyn Tool> {
+         Box::new(Self { inner })
+@@ -306,6 +340,7 @@ impl Tool for ArcDelegatingTool {
+     }
+ }
+ 
++#[cfg_attr(feature = "lath", allow(dead_code))]
+ fn boxed_registry_from_arcs(tools: Vec<Arc<dyn Tool>>) -> Vec<Box<dyn Tool>> {
+     tools.into_iter().map(ArcDelegatingTool::boxed).collect()
+ }
+@@ -662,6 +697,7 @@ pub fn all_tools(
+ 
+ /// Peer groups that include `agent_alias`, cloned from `config`. Used as the
+ /// live resolver body for `send_via` authority (and the snapshot fallback).
++#[cfg_attr(feature = "lath", allow(dead_code))]
+ fn filter_agent_peer_groups(
+     config: &Config,
+     agent_alias: &str,
+@@ -676,11 +712,13 @@ fn filter_agent_peer_groups(
+ 
+ struct RuntimeShellAssembly {
+     shell_tool: ShellTool,
++    #[cfg_attr(feature = "lath", allow(dead_code))]
+     sandbox: Arc<dyn Sandbox>,
+ }
+ 
+ /// Adapts the runtime's canonical per-agent sandbox to the Git tool without
+ /// making the lower-level tools crate depend on the runtime crate.
++#[cfg_attr(feature = "lath", allow(dead_code))]
+ struct RuntimeGitCommandBoundary {
+     sandbox: Arc<dyn Sandbox>,
+     runtime_kind: zeroclaw_config::schema::RuntimeKind,
+@@ -862,6 +900,7 @@ pub(crate) fn plugin_host_services(
+ /// debug builds, with Windows frames some 10–25% larger. Reserving roughly
+ /// twice the measured worst case keeps the builder off every caller's stack
+ /// budget without itself becoming a new cliff.
++#[cfg_attr(feature = "lath", allow(dead_code))]
+ const TOOL_REGISTRY_BUILD_STACK_BYTES: usize = 4 * 1024 * 1024;
+ 
+ /// Force-compile the process-global lazy regexes used on the turn path.
+@@ -873,6 +912,7 @@ const TOOL_REGISTRY_BUILD_STACK_BYTES: usize = 4 * 1024 * 1024;
+ /// a tool registry first, so warming them here — on the registry-builder
+ /// thread, before any turn stack exists — keeps the recursion off every
+ /// caller. Runs at most once per process.
++#[cfg_attr(feature = "lath", allow(dead_code))]
+ fn warm_lazy_regexes() {
+     std::sync::LazyLock::force(&crate::agent::turn::redact::SENSITIVE_KV_REGEX);
+     std::sync::LazyLock::force(&crate::agent::turn::redact::SENSITIVE_KEY_REGEX);
+@@ -950,7 +990,46 @@ pub fn all_tools_with_runtime(
+     )
+ }
+ 
++/// The Lath build's registry, in place of the full one: the two file tools
++/// and the six host tools, whatever the rest of the config enables (see
++/// `lath_host`). Same signature as the full builder so every caller, and
++/// every path that assembles a registry, gets the Lath one.
++#[cfg(feature = "lath")]
++#[allow(
++    clippy::implicit_hasher,
++    clippy::too_many_arguments,
++    clippy::type_complexity,
++    clippy::needless_pass_by_value
++)]
++pub fn all_tools_with_runtime_and_acp_sessions(
++    _config: Arc<Config>,
++    security: &Arc<SecurityPolicy>,
++    _risk_profile: &zeroclaw_config::schema::RiskProfileConfig,
++    _agent_alias: &str,
++    runtime: Arc<dyn RuntimeAdapter>,
++    _memory: Arc<dyn Memory>,
++    _composio_key: Option<&str>,
++    _composio_entity_id: Option<&str>,
++    _browser_config: &zeroclaw_config::schema::BrowserConfig,
++    _http_config: &zeroclaw_config::schema::HttpRequestConfig,
++    _web_fetch_config: &zeroclaw_config::schema::WebFetchConfig,
++    _workspace_dir: &std::path::Path,
++    _agents: &HashMap<String, AliasedAgentConfig>,
++    _fallback_api_key: Option<&str>,
++    root_config: &zeroclaw_config::schema::Config,
++    _canvas_store: Option<CanvasStore>,
++    _is_subagent_caller: bool,
++    _tui_env: Option<HashMap<String, String>>,
++    _sop_engine: Option<Arc<Mutex<SopEngine>>>,
++    _sop_audit: Option<Arc<SopAuditLogger>>,
++    _live_config: Option<Arc<parking_lot::RwLock<zeroclaw_config::schema::Config>>>,
++    _acp_sessions: Option<AcpSessionReadView>,
++) -> anyhow::Result<AllToolsResult> {
++    lath_host::lath_registry(root_config, security, &runtime)
++}
++
+ /// Create the full tool registry with an optional ACP session read view.
++#[cfg(not(feature = "lath"))]
+ #[allow(
+     clippy::implicit_hasher,
+     clippy::too_many_arguments,
+@@ -1039,6 +1118,7 @@ pub fn all_tools_with_runtime_and_acp_sessions(
+ 
+ /// Registry build body; runs on the dedicated builder thread spawned by
+ /// [`all_tools_with_runtime`].
++#[cfg(not(feature = "lath"))]
+ #[allow(
+     clippy::implicit_hasher,
+     clippy::too_many_arguments,
+diff --git a/crates/zeroclaw-runtime/src/tools/scoped.rs b/crates/zeroclaw-runtime/src/tools/scoped.rs
+index 034136d..dc11af0 100644
+--- a/crates/zeroclaw-runtime/src/tools/scoped.rs
++++ b/crates/zeroclaw-runtime/src/tools/scoped.rs
+@@ -227,6 +227,15 @@ impl ScopedToolRegistry {
+                 delegate_tool: _,
+         } = built;
+ 
++        // The Lath build assembles from the Lath registry alone: no peripheral,
++        // pipeline, MCP or skill stage runs, whatever the caller or the config
++        // asks for, so nothing but the eight Lath tools can reach the model
++        // through this seam (the run path then refuses any other name).
++        let lath = cfg!(feature = "lath");
++        let connect_peripherals = connect_peripherals && !lath;
++        let connect_mcp = connect_mcp && !lath;
++        let skills: &[Skill] = if lath { &[] } else { skills };
++
+         // 1. Peripherals. Loading CONNECTS hardware (serial opens are exclusive for
+         //    real devices), so this is gated: execution surfaces pass
+         //    `connect_peripherals: true`; listing-only surfaces pass `false` and
+@@ -253,7 +262,7 @@ impl ScopedToolRegistry {
+             .filter(|tool| tool_allowed_in_context(tool.name(), exclude_memory, acp_delivery))
+             .cloned()
+             .collect();
+-        let pipeline_tool = config.pipeline.enabled.then(|| {
++        let pipeline_tool = (config.pipeline.enabled && !lath).then(|| {
+             Arc::new(tools::PipelineTool::with_access_policy(
+                 config.pipeline.clone(),
+                 context_filtered_tool_arcs.clone(),
+diff --git a/crates/zeroclaw-tools/src/attribution.rs b/crates/zeroclaw-tools/src/attribution.rs
+index 7a0334b..0f19aa1 100644
+--- a/crates/zeroclaw-tools/src/attribution.rs
++++ b/crates/zeroclaw-tools/src/attribution.rs
+@@ -8,8 +8,11 @@ use zeroclaw_api::tool_attribution;
+ 
+ use crate::ask_user::AskUserTool;
+ use crate::backup_tool::BackupTool;
++#[cfg(not(feature = "lath"))]
+ use crate::browser::BrowserTool;
++#[cfg(not(feature = "lath"))]
+ use crate::browser_delegate::BrowserDelegateTool;
++#[cfg(not(feature = "lath"))]
+ use crate::browser_open::BrowserOpenTool;
+ use crate::calculator::CalculatorTool;
+ use crate::canvas::CanvasTool;
+@@ -19,29 +22,39 @@ use crate::claude_code_runner::ClaudeCodeRunnerTool;
+ use crate::cloud_ops::CloudOpsTool;
+ use crate::cloud_patterns::CloudPatternsTool;
+ use crate::codex_cli::CodexCliTool;
++#[cfg(not(feature = "lath"))]
+ use crate::composio::ComposioTool;
+ use crate::content_search::ContentSearchTool;
+ use crate::data_management::DataManagementTool;
++#[cfg(not(feature = "lath"))]
+ use crate::discord_search::DiscordSearchTool;
+ use crate::escalate::EscalateToHumanTool;
++#[cfg(not(feature = "lath"))]
+ use crate::file_download::FileDownloadTool;
+ use crate::file_edit::FileEditTool;
++#[cfg(not(feature = "lath"))]
+ use crate::file_upload::FileUploadTool;
++#[cfg(not(feature = "lath"))]
+ use crate::file_upload_bundle::FileUploadBundleTool;
+ use crate::file_write::FileWriteTool;
+ use crate::gemini_cli::GeminiCliTool;
+ use crate::git_forge::GitForgeTool;
+ use crate::git_operations::GitOperationsTool;
+ use crate::glob_search::GlobSearchTool;
++#[cfg(not(feature = "lath"))]
+ use crate::google_workspace::GoogleWorkspaceTool;
+ use crate::hardware_board_info::HardwareBoardInfoTool;
+ use crate::hardware_memory_map::HardwareMemoryMapTool;
+ use crate::hardware_memory_read::HardwareMemoryReadTool;
++#[cfg(not(feature = "lath"))]
+ use crate::http_request::HttpRequestTool;
++#[cfg(not(feature = "lath"))]
+ use crate::image_gen::ImageGenTool;
+ use crate::image_info::ImageInfoTool;
++#[cfg(not(feature = "lath"))]
+ use crate::jira_tool::JiraTool;
+ use crate::knowledge_tool::KnowledgeTool;
++#[cfg(not(feature = "lath"))]
+ use crate::linkedin::LinkedInTool;
+ use crate::llm_task::LlmTaskTool;
+ use crate::mcp_tool::McpToolWrapper;
+@@ -50,14 +63,17 @@ use crate::memory_forget::MemoryForgetTool;
+ use crate::memory_purge::MemoryPurgeTool;
+ use crate::memory_recall::MemoryRecallTool;
+ use crate::memory_store::MemoryStoreTool;
++#[cfg(not(feature = "lath"))]
+ use crate::microsoft365::Microsoft365Tool;
+ use crate::model_routing_config::ModelRoutingConfigTool;
++#[cfg(not(feature = "lath"))]
+ use crate::notion_tool::NotionTool;
+ use crate::opencode_cli::OpenCodeCliTool;
+ use crate::pipeline::PipelineTool;
+ use crate::poll::PollTool;
+ use crate::project_intel::ProjectIntelTool;
+ use crate::proxy_config::ProxyConfigTool;
++#[cfg(not(feature = "lath"))]
+ use crate::pushover::PushoverTool;
+ use crate::reaction::ReactionTool;
+ use crate::report_template_tool::ReportTemplateTool;
+@@ -67,16 +83,23 @@ use crate::sessions::{
+     SessionDeleteTool, SessionResetTool, SessionsCurrentTool, SessionsHistoryTool,
+     SessionsListTool, SessionsSendTool,
+ };
++#[cfg(not(feature = "lath"))]
+ use crate::text_browser::TextBrowserTool;
+ use crate::tool_search::ToolSearchTool;
++#[cfg(not(feature = "lath"))]
+ use crate::weather_tool::WeatherTool;
++#[cfg(not(feature = "lath"))]
+ use crate::web_fetch::WebFetchTool;
++#[cfg(not(feature = "lath"))]
+ use crate::web_search_tool::WebSearchTool;
+ 
+ tool_attribution!(AskUserTool, ToolKind::Wait);
+ tool_attribution!(BackupTool, ToolKind::Plugin);
++#[cfg(not(feature = "lath"))]
+ tool_attribution!(BrowserTool, ToolKind::Plugin);
++#[cfg(not(feature = "lath"))]
+ tool_attribution!(BrowserDelegateTool, ToolKind::Plugin);
++#[cfg(not(feature = "lath"))]
+ tool_attribution!(BrowserOpenTool, ToolKind::Plugin);
+ tool_attribution!(CalculatorTool, ToolKind::Plugin);
+ tool_attribution!(CanvasTool, ToolKind::Plugin);
+@@ -86,29 +109,39 @@ tool_attribution!(ClaudeCodeRunnerTool, ToolKind::Plugin);
+ tool_attribution!(CloudOpsTool, ToolKind::Plugin);
+ tool_attribution!(CloudPatternsTool, ToolKind::Plugin);
+ tool_attribution!(CodexCliTool, ToolKind::Plugin);
++#[cfg(not(feature = "lath"))]
+ tool_attribution!(ComposioTool, ToolKind::Plugin);
+ tool_attribution!(ContentSearchTool, ToolKind::Search);
+ tool_attribution!(DataManagementTool, ToolKind::Plugin);
++#[cfg(not(feature = "lath"))]
+ tool_attribution!(DiscordSearchTool, ToolKind::Search);
+ tool_attribution!(EscalateToHumanTool, ToolKind::Wait);
++#[cfg(not(feature = "lath"))]
+ tool_attribution!(FileDownloadTool, ToolKind::Plugin);
+ tool_attribution!(FileEditTool, ToolKind::Plugin);
++#[cfg(not(feature = "lath"))]
+ tool_attribution!(FileUploadTool, ToolKind::Plugin);
++#[cfg(not(feature = "lath"))]
+ tool_attribution!(FileUploadBundleTool, ToolKind::Plugin);
+ tool_attribution!(FileWriteTool, ToolKind::Plugin);
+ tool_attribution!(GeminiCliTool, ToolKind::Plugin);
+ tool_attribution!(GitOperationsTool, ToolKind::Shell);
+ tool_attribution!(GitForgeTool, ToolKind::Plugin);
+ tool_attribution!(GlobSearchTool, ToolKind::Search);
++#[cfg(not(feature = "lath"))]
+ tool_attribution!(GoogleWorkspaceTool, ToolKind::Plugin);
+ tool_attribution!(HardwareBoardInfoTool, ToolKind::Plugin);
+ tool_attribution!(HardwareMemoryMapTool, ToolKind::Plugin);
+ tool_attribution!(HardwareMemoryReadTool, ToolKind::Plugin);
++#[cfg(not(feature = "lath"))]
+ tool_attribution!(HttpRequestTool, ToolKind::HttpRequest);
++#[cfg(not(feature = "lath"))]
+ tool_attribution!(ImageGenTool, ToolKind::Plugin);
+ tool_attribution!(ImageInfoTool, ToolKind::Plugin);
++#[cfg(not(feature = "lath"))]
+ tool_attribution!(JiraTool, ToolKind::Plugin);
+ tool_attribution!(KnowledgeTool, ToolKind::Plugin);
++#[cfg(not(feature = "lath"))]
+ tool_attribution!(LinkedInTool, ToolKind::Plugin);
+ tool_attribution!(LlmTaskTool, ToolKind::Plugin);
+ tool_attribution!(McpToolWrapper, ToolKind::Plugin, ToolProvenance::Extension);
+@@ -117,14 +150,17 @@ tool_attribution!(MemoryForgetTool, ToolKind::Memory);
+ tool_attribution!(MemoryPurgeTool, ToolKind::Memory);
+ tool_attribution!(MemoryRecallTool, ToolKind::Memory);
+ tool_attribution!(MemoryStoreTool, ToolKind::Memory);
++#[cfg(not(feature = "lath"))]
+ tool_attribution!(Microsoft365Tool, ToolKind::Plugin);
+ tool_attribution!(ModelRoutingConfigTool, ToolKind::Plugin);
++#[cfg(not(feature = "lath"))]
+ tool_attribution!(NotionTool, ToolKind::Plugin);
+ tool_attribution!(OpenCodeCliTool, ToolKind::Plugin);
+ tool_attribution!(PipelineTool, ToolKind::Plugin);
+ tool_attribution!(PollTool, ToolKind::Wait);
+ tool_attribution!(ProjectIntelTool, ToolKind::Plugin);
+ tool_attribution!(ProxyConfigTool, ToolKind::Plugin);
++#[cfg(not(feature = "lath"))]
+ tool_attribution!(PushoverTool, ToolKind::Plugin);
+ tool_attribution!(ReactionTool, ToolKind::Plugin);
+ tool_attribution!(ReportTemplateTool, ToolKind::Plugin);
+@@ -136,10 +172,14 @@ tool_attribution!(SessionsCurrentTool, ToolKind::Plugin);
+ tool_attribution!(SessionsHistoryTool, ToolKind::Plugin);
+ tool_attribution!(SessionsListTool, ToolKind::Plugin);
+ tool_attribution!(SessionsSendTool, ToolKind::Plugin);
++#[cfg(not(feature = "lath"))]
+ tool_attribution!(TextBrowserTool, ToolKind::Plugin);
+ tool_attribution!(ToolSearchTool, ToolKind::Search);
++#[cfg(not(feature = "lath"))]
+ tool_attribution!(WeatherTool, ToolKind::Plugin);
++#[cfg(not(feature = "lath"))]
+ tool_attribution!(WebFetchTool, ToolKind::FetchUrl);
++#[cfg(not(feature = "lath"))]
+ tool_attribution!(WebSearchTool, ToolKind::Search);
+ 
+ #[cfg(test)]
+diff --git a/crates/zeroclaw-tools/src/helpers/domain_guard.rs b/crates/zeroclaw-tools/src/helpers/domain_guard.rs
+index 3e49008..b99618a 100644
+--- a/crates/zeroclaw-tools/src/helpers/domain_guard.rs
++++ b/crates/zeroclaw-tools/src/helpers/domain_guard.rs
+@@ -30,6 +30,8 @@ pub use zeroclaw_infra::net_guard::{Nat64Prefix, parse_nat64_prefixes};
+ // ── address classification and resolved-address validation ────────
+ // Crate-internal: these keep the visibility they had before the primitives
+ // moved to zeroclaw-infra, so the tool crate's public surface is unchanged.
++// Only the network tools use them, and the Lath build compiles none.
++#[cfg(not(feature = "lath"))]
+ pub(crate) use zeroclaw_infra::net_guard::{
+     is_cloud_metadata_ip, is_known_cloud_metadata_endpoint, validate_resolved_ips_are_public,
+     validate_resolved_ips_exclude_metadata,
+diff --git a/crates/zeroclaw-tools/src/lib.rs b/crates/zeroclaw-tools/src/lib.rs
+index b99d666..95fa5d2 100644
+--- a/crates/zeroclaw-tools/src/lib.rs
++++ b/crates/zeroclaw-tools/src/lib.rs
+@@ -3,14 +3,22 @@
+ pub mod attribution;
+ pub mod helpers;
+ pub(crate) mod i18n;
++// The Lath build (`lath` feature) does not compile the tool modules that open
++// a network connection or drive a browser: a reference to one from the Lath
++// registry is a compile error, not a config switch. Each is marked below.
++#[cfg(not(feature = "lath"))]
+ pub mod microsoft365;
+ pub mod util_helpers;
+ 
++#[cfg(not(feature = "lath"))]
+ pub mod a2a_client;
+ pub mod ask_user;
+ pub mod backup_tool;
++#[cfg(not(feature = "lath"))]
+ pub mod browser;
++#[cfg(not(feature = "lath"))]
+ pub mod browser_delegate;
++#[cfg(not(feature = "lath"))]
+ pub mod browser_open;
+ pub mod calculator;
+ pub mod canvas;
+@@ -22,35 +30,50 @@ pub mod cloud_ops;
+ pub mod cloud_patterns;
+ pub mod codex_cli;
+ pub mod coding_cli;
++#[cfg(not(feature = "lath"))]
+ pub mod composio;
+ pub mod content_search;
+ pub mod data_management;
++#[cfg(not(feature = "lath"))]
+ pub mod discord_search;
++#[cfg(not(feature = "lath"))]
+ pub mod email_imap;
++#[cfg(not(feature = "lath"))]
+ pub mod email_read;
++#[cfg(not(feature = "lath"))]
+ pub mod email_search;
+ pub mod embedded_resource;
+ pub mod escalate;
++#[cfg(not(feature = "lath"))]
+ pub mod file_download;
+ pub mod file_edit;
++#[cfg(not(feature = "lath"))]
+ pub mod file_upload;
++#[cfg(not(feature = "lath"))]
+ pub mod file_upload_bundle;
+ pub mod file_write;
+ pub mod gemini_cli;
+ pub mod git_forge;
+ pub mod git_operations;
+ pub mod glob_search;
++#[cfg(not(feature = "lath"))]
+ pub mod google_workspace;
+ pub mod hardware_board_info;
+ pub mod hardware_memory_map;
+ pub mod hardware_memory_read;
++#[cfg(not(feature = "lath"))]
+ mod http_decode;
++#[cfg(not(feature = "lath"))]
+ pub mod http_request;
++#[cfg(not(feature = "lath"))]
+ pub mod image_gen;
+ pub mod image_info;
++#[cfg(not(feature = "lath"))]
+ pub mod jira_tool;
+ pub mod knowledge_tool;
++#[cfg(not(feature = "lath"))]
+ pub mod linkedin;
++#[cfg(not(feature = "lath"))]
+ pub mod linkedin_client;
+ pub mod llm_task;
+ pub mod mcp_client;
+@@ -70,12 +93,14 @@ pub mod memory_recall;
+ pub mod memory_store;
+ pub mod model_routing_config;
+ pub mod node_capabilities;
++#[cfg(not(feature = "lath"))]
+ pub mod notion_tool;
+ pub mod opencode_cli;
+ pub mod pipeline;
+ pub mod poll;
+ pub mod project_intel;
+ pub mod proxy_config;
++#[cfg(not(feature = "lath"))]
+ pub mod pushover;
+ pub mod reaction;
+ pub mod report_template_tool;
+@@ -83,11 +108,16 @@ pub mod report_templates;
+ pub mod screenshot;
+ pub mod send_via;
+ pub mod sessions;
++#[cfg(not(feature = "lath"))]
+ pub mod text_browser;
+ pub mod tool_search;
++#[cfg(not(feature = "lath"))]
+ pub mod weather_tool;
++#[cfg(not(feature = "lath"))]
+ pub mod web_fetch;
++#[cfg(not(feature = "lath"))]
+ pub mod web_search_provider_routing;
++#[cfg(not(feature = "lath"))]
+ pub mod web_search_tool;
+ pub mod wrappers;
+ 
+-- 
+2.50.1 (Apple Git-155)
+

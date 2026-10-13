@@ -1,0 +1,1593 @@
+From 8076ef67bc7d926e53b99205045d89cf4969cda3 Mon Sep 17 00:00:00 2001
+From: Lath <lath.solana@gmail.com>
+Date: Thu, 24 Sep 2026 18:04:08 -0300
+Subject: [PATCH 5/6] lath: fail loud on any config but the posture, and run
+ with no shell
+
+Under the lath feature a missing config is an error and nothing is written for it; an old schema, a section the resilient loader dropped, an unknown key or a config that does not validate stops the run instead of warning. The Lath posture check is an allow-list of the contract's keys and values: one custom provider, one agent with memory none, a non-empty allowed_tools within the eight, level full with no approvals, sandbox_enabled false, cost off, no retries, and the host-tool socket; any ZEROCLAW_* variable but NOW, OMIT_HOST and CONFIG_DIR, and a skills/ entry in the workspace, are refused by name. Skills load nothing, the open-skills clone and the skill HTTP tool are not compiled, skill creation and review never run, model_switch is out, create_runtime returns a shell-less adapter so no shell is resolved or stat'ed and the prompt has no Shell:, and create_sandbox detects nothing.
+---
+ crates/zeroclaw-config/src/platform/lath.rs   |  74 ++
+ crates/zeroclaw-config/src/platform/mod.rs    |  20 +-
+ crates/zeroclaw-config/src/schema.rs          | 201 ++++-
+ crates/zeroclaw-runtime/src/agent/loop_.rs    |  23 +-
+ crates/zeroclaw-runtime/src/agent/turn/mod.rs |   3 +
+ .../src/agent/turn/outcome.rs                 |   1 +
+ .../zeroclaw-runtime/src/security/detect.rs   |   9 +-
+ crates/zeroclaw-runtime/src/skills/mod.rs     |  42 +-
+ .../zeroclaw-runtime/src/tools/attribution.rs |   4 +
+ crates/zeroclaw-runtime/src/tools/mod.rs      |   7 +
+ src/lath.rs                                   | 696 +++++++++++++++++-
+ src/memory/mod.rs                             |   4 +-
+ 12 files changed, 1052 insertions(+), 32 deletions(-)
+ create mode 100644 crates/zeroclaw-config/src/platform/lath.rs
+
+diff --git a/crates/zeroclaw-config/src/platform/lath.rs b/crates/zeroclaw-config/src/platform/lath.rs
+new file mode 100644
+index 0000000..fc9e2dc
+--- /dev/null
++++ b/crates/zeroclaw-config/src/platform/lath.rs
+@@ -0,0 +1,74 @@
++//! The Lath build's runtime adapter: the process itself, and no shell.
++//!
++//! A binary built with the `lath` feature gets this adapter from
++//! [`super::create_runtime`] whatever `[runtime]` says. It reports
++//! [`ShellDialect::None`], so nothing resolves or `stat`s a shell at startup
++//! (the Lath wrapper's sandbox profile has no rule for `/bin/sh`, and a
++//! lookup there is a denied syscall), the system prompt carries no `Shell:`,
++//! and any attempt to build a shell command is an error rather than a spawn.
++
++use super::{RuntimeAdapter, ShellDialect};
++use std::path::{Path, PathBuf};
++
++/// The shell-less runtime of the Lath build.
++#[derive(Debug, Clone, Copy, Default)]
++pub struct LathRuntime;
++
++impl RuntimeAdapter for LathRuntime {
++    fn name(&self) -> &str {
++        "lath"
++    }
++
++    fn has_filesystem_access(&self) -> bool {
++        true
++    }
++
++    fn storage_path(&self) -> PathBuf {
++        directories::UserDirs::new().map_or_else(
++            || PathBuf::from(".zeroclaw"),
++            |u| u.home_dir().join(".zeroclaw"),
++        )
++    }
++
++    fn supports_long_running(&self) -> bool {
++        false
++    }
++
++    fn shell_dialect(&self) -> ShellDialect {
++        ShellDialect::None
++    }
++
++    fn build_shell_command(
++        &self,
++        command: &str,
++        _workspace_dir: &Path,
++    ) -> anyhow::Result<tokio::process::Command> {
++        let _ = command;
++        anyhow::bail!("lath: the Lath build has no shell and runs no command")
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn the_lath_runtime_has_no_shell() {
++        let rt = LathRuntime;
++        assert!(!rt.has_shell_access());
++        assert_eq!(rt.shell_profile(), None);
++        assert!(rt.build_shell_command("echo hi", Path::new("/")).is_err());
++    }
++
++    #[cfg(feature = "lath")]
++    #[test]
++    fn the_lath_build_ignores_the_configured_shell() {
++        let cfg = crate::schema::RuntimeConfig {
++            shell: Some("/definitely/not/a/shell".into()),
++            ..crate::schema::RuntimeConfig::default()
++        };
++        let rt = super::super::create_runtime(&cfg).unwrap();
++        assert_eq!(rt.name(), "lath");
++        assert_eq!(rt.shell_profile(), None);
++    }
++}
+diff --git a/crates/zeroclaw-config/src/platform/mod.rs b/crates/zeroclaw-config/src/platform/mod.rs
+index 12162cf..6bdda48 100644
+--- a/crates/zeroclaw-config/src/platform/mod.rs
++++ b/crates/zeroclaw-config/src/platform/mod.rs
+@@ -1,13 +1,25 @@
+ pub mod docker;
++#[cfg(feature = "lath")]
++pub mod lath;
+ pub mod native;
+ 
+ pub use docker::DockerRuntime;
+ pub use native::NativeRuntime;
+ pub use zeroclaw_api::runtime_traits::{RuntimeAdapter, ShellDialect, ShellProfile};
+ 
++// `RuntimeKind` and the shell checks serve only the non-Lath runtimes.
++#[cfg_attr(feature = "lath", allow(unused_imports))]
+ use crate::schema::{RuntimeConfig, RuntimeKind};
+ 
+ pub fn create_runtime(config: &RuntimeConfig) -> anyhow::Result<Box<dyn RuntimeAdapter>> {
++    // The Lath build has no shell: `[runtime]` is not consulted, so no shell
++    // is resolved or `stat`ed and the prompt names none (see `lath`).
++    #[cfg(feature = "lath")]
++    {
++        let _ = config;
++        Ok(Box::new(lath::LathRuntime))
++    }
++    #[cfg(not(feature = "lath"))]
+     match config.kind {
+         RuntimeKind::Native => {
+             let shell = config.shell.clone().unwrap_or_else(native::default_shell);
+@@ -25,6 +37,7 @@ pub fn create_runtime(config: &RuntimeConfig) -> anyhow::Result<Box<dyn RuntimeA
+ }
+ 
+ #[cfg(unix)]
++#[cfg_attr(feature = "lath", allow(dead_code))]
+ fn validate_shell(shell: &str) -> anyhow::Result<()> {
+     use std::os::unix::fs::PermissionsExt;
+ 
+@@ -101,6 +114,7 @@ fn validate_shell(shell: &str) -> anyhow::Result<()> {
+ /// worth catching up front is an empty/whitespace value, which would otherwise
+ /// spawn with no program.
+ #[cfg(windows)]
++#[cfg_attr(feature = "lath", allow(dead_code))]
+ fn validate_shell_windows(shell: &str) -> anyhow::Result<()> {
+     if shell.trim().is_empty() {
+         anyhow::bail!("runtime.shell must not be empty or whitespace");
+@@ -112,7 +126,7 @@ fn validate_shell_windows(shell: &str) -> anyhow::Result<()> {
+ /// ran (`SHIM_RAN`) and each argument it received (`arg:<value>`). Used by
+ /// tests to prove a configured shell is the binary that actually executes a
+ /// command and that it receives the `-c <command>` boundary.
+-#[cfg(all(test, unix))]
++#[cfg(all(test, unix, not(feature = "lath")))]
+ fn write_recording_shim(dir: &std::path::Path) -> std::path::PathBuf {
+     use std::os::unix::fs::PermissionsExt;
+     let shim = dir.join("recording-shell");
+@@ -125,7 +139,9 @@ fn write_recording_shim(dir: &std::path::Path) -> std::path::PathBuf {
+     shim
+ }
+ 
+-#[cfg(test)]
++// These describe the upstream factory: a native or Docker runtime with a shell. The Lath
++// build's factory returns the shell-less `lath::LathRuntime` instead, tested there.
++#[cfg(all(test, not(feature = "lath")))]
+ mod tests {
+     use super::*;
+     use crate::schema::{RuntimeConfig, RuntimeKind};
+diff --git a/crates/zeroclaw-config/src/schema.rs b/crates/zeroclaw-config/src/schema.rs
+index a1f0af0..3536e03 100644
+--- a/crates/zeroclaw-config/src/schema.rs
++++ b/crates/zeroclaw-config/src/schema.rs
+@@ -21975,17 +21975,27 @@ impl Config {
+     /// consumed it (covers `Option<T>` fields and `#[serde(alias)]` names).
+     /// V1 legacy keys (consumed by migration) are also accepted.
+     pub fn unknown_keys(raw_toml: &str) -> Vec<String> {
++        static DEFAULTS: OnceLock<toml::Table> = OnceLock::new();
++        let defaults = DEFAULTS.get_or_init(Self::default_table);
++        Self::unknown_keys_against(raw_toml, defaults)
++    }
++
++    /// `Config::default()` as a TOML table. It embeds paths resolved from the
++    /// environment, so a cached copy is only valid for the environment it was
++    /// computed in.
++    fn default_table() -> toml::Table {
++        toml::to_string(&Config::default())
++            .ok()
++            .and_then(|s| s.parse().ok())
++            .unwrap_or_default()
++    }
++
++    /// [`Self::unknown_keys`] against an explicit default table.
++    fn unknown_keys_against(raw_toml: &str, defaults: &toml::Table) -> Vec<String> {
+         let raw: toml::Table = match raw_toml.parse() {
+             Ok(t) => t,
+             Err(_) => return Vec::new(),
+         };
+-        static DEFAULTS: OnceLock<toml::Table> = OnceLock::new();
+-        let defaults = DEFAULTS.get_or_init(|| {
+-            toml::to_string(&Config::default())
+-                .ok()
+-                .and_then(|s| s.parse().ok())
+-                .unwrap_or_default()
+-        });
+         raw.keys()
+             .filter(|key| {
+                 if defaults.contains_key(key.as_str()) {
+@@ -22178,6 +22188,17 @@ impl Config {
+         // "don't touch the filesystem"; the TOML migrator will surface
+         // the real error.
+         let config_toml_path = zeroclaw_dir.join("config.toml");
++        // The Lath build reads the config its host wrote for the step and
++        // writes nothing before that config has been checked: no default
++        // config for a missing file, no filesystem migration for an old one.
++        #[cfg(feature = "lath")]
++        if !config_toml_path.is_file() {
++            anyhow::bail!(
++                "lath: no config.toml in {}: the Lath build runs the config its host wrote and \
++                 creates none",
++                zeroclaw_dir.display()
++            );
++        }
+         let needs_fs_migration = config_toml_path.is_file()
+             && matches!(
+                 std::fs::read_to_string(&config_toml_path)
+@@ -22186,6 +22207,14 @@ impl Config {
+                     .and_then(|v| crate::migration::detect_version(&v).ok()),
+                 Some(v) if v < crate::migration::CURRENT_SCHEMA_VERSION
+             );
++        #[cfg(feature = "lath")]
++        if needs_fs_migration {
++            anyhow::bail!(
++                "lath: refused a config older than schema_version {}: the Lath build migrates \
++                 nothing",
++                crate::migration::CURRENT_SCHEMA_VERSION
++            );
++        }
+         if needs_fs_migration
+             && let Err(e) = crate::schema::v2::migrate_v2_to_v3_install_filesystem(&zeroclaw_dir)
+         {
+@@ -22200,6 +22229,7 @@ impl Config {
+                 "[system] filesystem migration failed; continuing with legacy layout"
+             );
+         } else if !needs_fs_migration
++            && !cfg!(feature = "lath")
+             && let Err(e) =
+                 crate::schema::v2::relocate_default_agent_skills_to_shared(&zeroclaw_dir)
+         {
+@@ -22250,12 +22280,16 @@ impl Config {
+         // not scoped to a single agent. Per-agent state still lives at
+         // `<install>/agents/<alias>/workspace/`.
+         let shared_dir = zeroclaw_dir.join("shared");
+-        fs::create_dir_all(&shared_dir).await.with_context(|| {
+-            format!(
+-                "Failed to create shared workspace directory: {}",
+-                shared_dir.display()
+-            )
+-        })?;
++        // The Lath build has no skills and no bundles, and writes nothing in
++        // its config directory outside `data/`.
++        if !cfg!(feature = "lath") {
++            fs::create_dir_all(&shared_dir).await.with_context(|| {
++                format!(
++                    "Failed to create shared workspace directory: {}",
++                    shared_dir.display()
++                )
++            })?;
++        }
+ 
+         fs::create_dir_all(&zeroclaw_dir)
+             .await
+@@ -22351,6 +22385,20 @@ impl Config {
+             // drops are recorded on `degraded_security` for exposure gating.
+             // Strict validation lives in `zeroclaw config migrate`.
+             let salvage = crate::migration::migrate_to_current_salvaged(&contents);
++            // A section the resilient loader dropped to its default is a step
++            // running a posture its host did not write; the Lath build stops.
++            #[cfg(feature = "lath")]
++            if let Some(section) = salvage
++                .dropped_security
++                .first()
++                .or_else(|| salvage.dropped.first())
++            {
++                anyhow::bail!(
++                    "lath: config section `{section}` in {} is malformed; the Lath build does \
++                     not run a section reset to defaults",
++                    config_path.display()
++                );
++            }
+             let mut config: Config = salvage.config;
+             config.degraded_security = salvage.dropped_security;
+             config.degraded_sections = salvage.dropped;
+@@ -22400,6 +22448,27 @@ impl Config {
+             // TOML table keys against what Config actually deserializes.
+             // This replaces the previous serde_ignored-based approach which
+             // had false-positive issues with #[serde(default)] nested structs.
++            // Probed against an empty config deserialized now, in this
++            // environment, rather than against `Config::default()`: several
++            // serde field defaults differ from `Default` (and embed paths),
++            // so the default table makes every probe look consumed and
++            // nothing is ever reported unknown.
++            #[cfg(feature = "lath")]
++            if let Some(key) = toml::from_str::<Config>("")
++                .ok()
++                .and_then(|empty| toml::to_string(&empty).ok())
++                .and_then(|s| s.parse::<toml::Table>().ok())
++                .and_then(|empty| {
++                    Self::unknown_keys_against(&contents, &empty)
++                        .into_iter()
++                        .next()
++                })
++            {
++                anyhow::bail!(
++                    "lath: refused unknown config key `{key}` in {}",
++                    config_path.display()
++                );
++            }
+             for key in Self::unknown_keys(&contents) {
+                 ::zeroclaw_log::record!(
+                     WARN,
+@@ -22464,7 +22533,14 @@ impl Config {
+             // exists on disk so the bundle has somewhere for skills to
+             // land immediately. Idempotent.
+             let install_root = config.install_root_dir();
+-            for alias in config.skill_bundles.keys().cloned().collect::<Vec<_>>() {
++            // The Lath build refuses skill bundles (its posture check), and
++            // creates no directory for one before that check runs.
++            let bundles: Vec<String> = if cfg!(feature = "lath") {
++                Vec::new()
++            } else {
++                config.skill_bundles.keys().cloned().collect()
++            };
++            for alias in bundles {
+                 if let Ok(dir) =
+                     crate::skill_bundles::resolve_directory(&config, &install_root, &alias)
+                     && let Err(e) = std::fs::create_dir_all(&dir)
+@@ -22506,6 +22582,12 @@ impl Config {
+             // it. Demote to a startup warning; the gateway and dashboard
+             // still come up so the user can navigate to the bad section
+             // and repair it.
++            // The Lath build has no `/config` to repair from: a step whose
++            // config does not validate does not run.
++            #[cfg(feature = "lath")]
++            if let Err(e) = config.validate() {
++                anyhow::bail!("lath: config does not validate: {e:#}");
++            }
+             if let Err(e) = config.validate() {
+                 ::zeroclaw_log::record!(
+                     WARN,
+@@ -35088,6 +35170,79 @@ automation_enabled = true
+         );
+     }
+ 
++    /// Load a config directory holding `contents` (or nothing) under the
++    /// Lath build, and return the error it must refuse with.
++    #[cfg(feature = "lath")]
++    async fn lath_load_error(contents: Option<&str>) -> (String, TempDir) {
++        let config_dir = TempDir::new().unwrap();
++        if let Some(contents) = contents {
++            fs::write(config_dir.path().join("config.toml"), contents)
++                .await
++                .unwrap();
++        }
++        let _config_dir_guard = EnvValueGuard::set("ZEROCLAW_CONFIG_DIR", config_dir.path());
++        let err = Box::pin(Config::load_or_init())
++            .await
++            .expect_err("the Lath build refuses this config")
++            .to_string();
++        (err, config_dir)
++    }
++
++    #[cfg(feature = "lath")]
++    #[test]
++    async fn lath_load_refuses_a_missing_config_and_writes_none() {
++        let _env_guard = env_override_lock().await;
++        let (err, dir) = lath_load_error(None).await;
++        assert!(err.contains("config.toml"), "{err}");
++        assert!(
++            !dir.path().join("config.toml").exists(),
++            "a default config was written"
++        );
++        assert!(
++            !dir.path().join("shared").exists(),
++            "the shared workspace was created"
++        );
++    }
++
++    #[cfg(feature = "lath")]
++    #[test]
++    async fn lath_load_refuses_an_unknown_key_by_name() {
++        let _env_guard = env_override_lock().await;
++        let (err, _dir) =
++            lath_load_error(Some("schema_version = 3\nnot_a_zeroclaw_key = 1\n")).await;
++        assert!(err.contains("not_a_zeroclaw_key"), "{err}");
++    }
++
++    #[cfg(feature = "lath")]
++    #[test]
++    async fn lath_load_refuses_a_malformed_section_by_name() {
++        let _env_guard = env_override_lock().await;
++        let (err, _dir) = lath_load_error(Some(
++            "schema_version = 3\n\n[reliability]\nprovider_retries = \"x\"\n",
++        ))
++        .await;
++        assert!(err.contains("reliability"), "{err}");
++    }
++
++    #[cfg(feature = "lath")]
++    #[test]
++    async fn lath_load_refuses_a_config_that_does_not_validate() {
++        let _env_guard = env_override_lock().await;
++        let (err, _dir) = lath_load_error(Some(
++            "schema_version = 3\n\n[agents.a]\nmodel_provider = \"custom.missing\"\n",
++        ))
++        .await;
++        assert!(err.contains("does not validate"), "{err}");
++    }
++
++    #[cfg(feature = "lath")]
++    #[test]
++    async fn lath_load_refuses_an_old_schema_without_migrating() {
++        let _env_guard = env_override_lock().await;
++        let (err, _dir) = lath_load_error(Some("schema_version = 2\n")).await;
++        assert!(err.contains("schema_version"), "{err}");
++    }
++
+     async fn env_override_lock() -> MutexGuard<'static, ()> {
+         // Delegate to the crate-shared lock so env-mutating tests in this
+         // module serialize against `env_overrides::tests` too. Without
+@@ -35886,6 +36041,8 @@ scope = "zeroclaw"
+         set_runtime_proxy_config(ProxyConfig::default());
+     }
+ 
++    // Upstream's resilient load; the Lath build refuses this input (see `lath_load_*`).
++    #[cfg(not(feature = "lath"))]
+     #[test]
+     async fn load_or_init_workspace_override_uses_workspace_root_for_config() {
+         let _env_guard = env_override_lock().await;
+@@ -35926,6 +36083,8 @@ scope = "zeroclaw"
+         let _ = fs::remove_dir_all(temp_home).await;
+     }
+ 
++    // Upstream's resilient load; the Lath build refuses this input (see `lath_load_*`).
++    #[cfg(not(feature = "lath"))]
+     #[test]
+     async fn load_or_init_workspace_suffix_uses_legacy_config_layout() {
+         let _env_guard = env_override_lock().await;
+@@ -35963,6 +36122,8 @@ scope = "zeroclaw"
+         let _ = fs::remove_dir_all(temp_home).await;
+     }
+ 
++    // Upstream's resilient load; the Lath build refuses this input (see `lath_load_*`).
++    #[cfg(not(feature = "lath"))]
+     #[test]
+     async fn load_or_init_workspace_override_keeps_existing_legacy_config() {
+         let _env_guard = env_override_lock().await;
+@@ -36078,6 +36239,8 @@ default_model = "legacy-model"
+         let _ = fs::remove_dir_all(temp_home).await;
+     }
+ 
++    // Upstream's resilient load; the Lath build refuses this input (see `lath_load_*`).
++    #[cfg(not(feature = "lath"))]
+     #[test]
+     #[allow(clippy::large_futures)]
+     async fn load_or_init_logs_existing_config_as_initialized() {
+@@ -36140,6 +36303,8 @@ default_model = "persisted-profile"
+         let _ = fs::remove_dir_all(temp_home).await;
+     }
+ 
++    // Upstream's resilient load; the Lath build refuses this input (see `lath_load_*`).
++    #[cfg(not(feature = "lath"))]
+     #[test]
+     #[allow(clippy::large_futures)]
+     async fn load_or_init_warns_for_current_and_legacy_wati_config() {
+@@ -36258,6 +36423,8 @@ shared_secret = "retired-node-transport-sentinel"
+         let _ = fs::remove_dir_all(temp_home).await;
+     }
+ 
++    // Upstream's resilient load; the Lath build refuses this input (see `lath_load_*`).
++    #[cfg(not(feature = "lath"))]
+     #[test]
+     #[allow(clippy::large_futures)]
+     async fn load_or_init_assigns_degraded_security_for_malformed_section() {
+@@ -36308,6 +36475,8 @@ audit = "should-be-a-table-not-a-string"
+         let _ = fs::remove_dir_all(temp_home).await;
+     }
+ 
++    // Upstream's resilient load; the Lath build refuses this input (see `lath_load_*`).
++    #[cfg(not(feature = "lath"))]
+     #[test]
+     #[allow(clippy::large_futures)]
+     async fn load_or_init_assigns_degraded_sections_for_malformed_channel_alias() {
+@@ -36450,6 +36619,8 @@ name = "weather-tool"
+         );
+     }
+ 
++    // Upstream's resilient load; the Lath build refuses this input (see `lath_load_*`).
++    #[cfg(not(feature = "lath"))]
+     #[test]
+     #[allow(clippy::large_futures)]
+     async fn load_or_init_marks_whole_config_degraded_for_unparseable_file() {
+@@ -36578,6 +36749,8 @@ runtime_profile = "default"
+         let _ = fs::remove_dir_all(temp_home).await;
+     }
+ 
++    // Upstream's resilient load; the Lath build refuses this input (see `lath_load_*`).
++    #[cfg(not(feature = "lath"))]
+     #[test]
+     #[allow(clippy::large_futures)]
+     async fn load_or_init_migrates_agents_with_object_form_delegates() {
+diff --git a/crates/zeroclaw-runtime/src/agent/loop_.rs b/crates/zeroclaw-runtime/src/agent/loop_.rs
+index 4519f6f..c26ea8b 100644
+--- a/crates/zeroclaw-runtime/src/agent/loop_.rs
++++ b/crates/zeroclaw-runtime/src/agent/loop_.rs
+@@ -1882,14 +1882,16 @@ pub async fn run(
+                 .map(|tool| tool.name())
+                 .filter(|name| !excluded_tool_names.contains(*name))
+                 .collect::<Vec<_>>();
+-            if let Some(suggestion) = crate::skills::render_missing_skill_install_suggestion(
+-                &effective_msg,
+-                &skills,
+-                &runtime_capability_names,
+-                &config.data_dir,
+-                &config.skills.extra_registries,
+-                config.skills.install_suggestions.enabled,
+-            ) {
++            if !cfg!(feature = "lath")
++                && let Some(suggestion) = crate::skills::render_missing_skill_install_suggestion(
++                    &effective_msg,
++                    &skills,
++                    &runtime_capability_names,
++                    &config.data_dir,
++                    &config.skills.extra_registries,
++                    config.skills.install_suggestions.enabled,
++                )
++            {
+                 final_output = suggestion;
+                 if interactive {
+                     println!("{final_output}");
+@@ -2143,7 +2145,8 @@ pub async fn run(
+             }
+ 
+             // After successful multi-step execution, attempt autonomous skill creation.
+-            if config.skills.skill_creation.enabled {
++            // The Lath build writes no skill and makes no extra model call for one.
++            if !cfg!(feature = "lath") && config.skills.skill_creation.enabled {
+                 let tool_calls = crate::skills::creator::extract_tool_calls_from_history(&history);
+                 if tool_calls.len() >= 2 {
+                     let creator = crate::skills::creator::SkillCreator::new(
+@@ -2218,7 +2221,7 @@ pub async fn run(
+             }
+             observer.record_event(&ObserverEvent::TurnComplete);
+ 
+-            if config.skills.skill_improvement.enabled {
++            if !cfg!(feature = "lath") && config.skills.skill_improvement.enabled {
+                 let review_workspace = config.agent_workspace_dir(agent_alias);
+                 let review_config = config.skills.skill_improvement.clone();
+                 let failed_slugs: Vec<String> =
+diff --git a/crates/zeroclaw-runtime/src/agent/turn/mod.rs b/crates/zeroclaw-runtime/src/agent/turn/mod.rs
+index 22581dd..d9db751 100644
+--- a/crates/zeroclaw-runtime/src/agent/turn/mod.rs
++++ b/crates/zeroclaw-runtime/src/agent/turn/mod.rs
+@@ -52,6 +52,9 @@ pub use outcome::{
+     ModelSwitchCallback, ModelSwitchRequested, ServedRoute, ServedRouteSink, ToolLoopCancelled,
+     is_model_switch_requested, is_tool_loop_cancelled,
+ };
++// `current_model_switch_state` serves only the `model_switch` tool, which the
++// Lath build does not compile.
++#[cfg_attr(feature = "lath", allow(unused_imports))]
+ pub(crate) use outcome::{current_model_switch_state, scope_model_switch_state};
+ #[cfg(test)]
+ pub(crate) use parse_response::build_native_assistant_history;
+diff --git a/crates/zeroclaw-runtime/src/agent/turn/outcome.rs b/crates/zeroclaw-runtime/src/agent/turn/outcome.rs
+index d234d46..657a97e 100644
+--- a/crates/zeroclaw-runtime/src/agent/turn/outcome.rs
++++ b/crates/zeroclaw-runtime/src/agent/turn/outcome.rs
+@@ -27,6 +27,7 @@ tokio::task_local! {
+     static MODEL_SWITCH_REQUEST: ModelSwitchCallback;
+ }
+ 
++#[cfg_attr(feature = "lath", allow(dead_code))]
+ pub(crate) fn current_model_switch_state() -> anyhow::Result<ModelSwitchCallback> {
+     MODEL_SWITCH_REQUEST.try_with(Arc::clone).map_err(|_| {
+         anyhow::Error::msg("model_switch is only available inside an active agent turn")
+diff --git a/crates/zeroclaw-runtime/src/security/detect.rs b/crates/zeroclaw-runtime/src/security/detect.rs
+index 42e2f6f..e807635 100644
+--- a/crates/zeroclaw-runtime/src/security/detect.rs
++++ b/crates/zeroclaw-runtime/src/security/detect.rs
+@@ -345,8 +345,13 @@ pub fn create_sandbox(
+ ) -> Arc<dyn Sandbox> {
+     let backend = &sandbox.backend;
+ 
+-    // If explicitly disabled, return noop
+-    if matches!(backend, SandboxBackend::None) || sandbox.enabled == Some(false) {
++    // If explicitly disabled, return noop. The Lath build never detects or
++    // builds a backend: its host's wrapper is the sandbox, and detection runs
++    // probes (`which`, a trial spawn) the wrapper denies.
++    if cfg!(feature = "lath")
++        || matches!(backend, SandboxBackend::None)
++        || sandbox.enabled == Some(false)
++    {
+         return Arc::new(super::traits::NoopSandbox);
+     }
+ 
+diff --git a/crates/zeroclaw-runtime/src/skills/mod.rs b/crates/zeroclaw-runtime/src/skills/mod.rs
+index 3fb935d..3a334f4 100644
+--- a/crates/zeroclaw-runtime/src/skills/mod.rs
++++ b/crates/zeroclaw-runtime/src/skills/mod.rs
+@@ -1,3 +1,4 @@
++#[cfg(not(feature = "lath"))]
+ pub mod skill_http;
+ pub mod skill_tool;
+ use anyhow::{Context, Result};
+@@ -38,8 +39,13 @@ pub use service::{
+ };
+ pub(crate) use suggestions::render_missing_skill_install_suggestion;
+ 
++// The open-skills fetch is not compiled in the Lath build; these stay for the
++// resolvers that report its settings.
++#[cfg_attr(feature = "lath", allow(dead_code))]
+ const OPEN_SKILLS_REPO_URL: &str = "https://github.com/besoeasy/open-skills";
++#[cfg_attr(feature = "lath", allow(dead_code))]
+ const OPEN_SKILLS_SYNC_MARKER: &str = ".zeroclaw-open-skills-sync";
++#[cfg_attr(feature = "lath", allow(dead_code))]
+ const OPEN_SKILLS_SYNC_INTERVAL_SECS: u64 = 60 * 60 * 24 * 7;
+ 
+ // ─── Skills registry (zeroclaw-skills) ────────────────────────────────────────
+@@ -624,6 +630,10 @@ pub fn load_skills_for_agent_audited(
+     config: &zeroclaw_config::schema::Config,
+     agent_alias: &str,
+ ) -> (Vec<Skill>, Vec<DroppedSkill>, Vec<ShadowedSkill>) {
++    // Skill bundles too: the Lath build loads no skill from anywhere.
++    if cfg!(feature = "lath") {
++        return (Vec::new(), Vec::new(), Vec::new());
++    }
+     let (mut skills, mut dropped) = load_skills_with_config_audited(workspace_dir, config);
+     let mut shadows: Vec<ShadowedSkill> = Vec::new();
+     let Some(agent) = config.agent(agent_alias) else {
+@@ -731,6 +741,11 @@ fn load_skills_with_open_skills_config(
+     config_open_skills_dir: Option<&str>,
+     config_allow_scripts: Option<bool>,
+ ) -> (Vec<Skill>, Vec<DroppedSkill>) {
++    // The Lath build loads no skill: a skill can carry a shell or HTTP tool,
++    // and a workspace `skills/` directory is refused at startup instead.
++    if cfg!(feature = "lath") {
++        return (Vec::new(), Vec::new());
++    }
+     let mut skills = Vec::new();
+     let mut dropped = Vec::new();
+     let allow_scripts = config_allow_scripts.unwrap_or(false);
+@@ -1096,6 +1111,7 @@ fn load_open_skills(repo_dir: &Path, allow_scripts: bool) -> (Vec<Skill>, Vec<Dr
+     (skills, dropped)
+ }
+ 
++#[cfg_attr(feature = "lath", allow(dead_code))]
+ fn parse_open_skills_enabled(raw: &str) -> Option<bool> {
+     match raw.trim().to_ascii_lowercase().as_str() {
+         "1" | "true" | "yes" | "on" => Some(true),
+@@ -1104,6 +1120,7 @@ fn parse_open_skills_enabled(raw: &str) -> Option<bool> {
+     }
+ }
+ 
++#[cfg_attr(feature = "lath", allow(dead_code))]
+ fn open_skills_enabled_from_sources(
+     config_open_skills_enabled: Option<bool>,
+     env_override: Option<&str>,
+@@ -1125,11 +1142,13 @@ fn open_skills_enabled_from_sources(
+     config_open_skills_enabled.unwrap_or(false)
+ }
+ 
++#[cfg_attr(feature = "lath", allow(dead_code))]
+ fn open_skills_enabled(config_open_skills_enabled: Option<bool>) -> bool {
+     let env_override = std::env::var("ZEROCLAW_OPEN_SKILLS_ENABLED").ok();
+     open_skills_enabled_from_sources(config_open_skills_enabled, env_override.as_deref())
+ }
+ 
++#[cfg_attr(feature = "lath", allow(dead_code))]
+ fn resolve_open_skills_dir_from_sources(
+     env_dir: Option<&str>,
+     config_dir: Option<&str>,
+@@ -1153,6 +1172,7 @@ fn resolve_open_skills_dir_from_sources(
+     home_dir.map(|home| home.join("open-skills"))
+ }
+ 
++#[cfg_attr(feature = "lath", allow(dead_code))]
+ fn resolve_open_skills_dir(config_open_skills_dir: Option<&str>) -> Option<PathBuf> {
+     let env_dir = std::env::var("ZEROCLAW_OPEN_SKILLS_DIR").ok();
+     let home_dir = UserDirs::new().map(|dirs| dirs.home_dir().to_path_buf());
+@@ -1163,6 +1183,17 @@ fn resolve_open_skills_dir(config_open_skills_dir: Option<&str>) -> Option<PathB
+     )
+ }
+ 
++/// The Lath build has no open-skills: nothing is cloned, pulled or read, and
++/// `ZEROCLAW_OPEN_SKILLS_*` is refused before this is reached.
++#[cfg(feature = "lath")]
++fn ensure_open_skills_repo(
++    _config_open_skills_enabled: Option<bool>,
++    _config_open_skills_dir: Option<&str>,
++) -> Option<PathBuf> {
++    None
++}
++
++#[cfg(not(feature = "lath"))]
+ fn ensure_open_skills_repo(
+     config_open_skills_enabled: Option<bool>,
+     config_open_skills_dir: Option<&str>,
+@@ -1200,6 +1231,7 @@ fn ensure_open_skills_repo(
+     Some(repo_dir)
+ }
+ 
++#[cfg(not(feature = "lath"))]
+ fn clone_open_skills_repo(repo_dir: &Path) -> bool {
+     if let Some(parent) = repo_dir.parent()
+         && let Err(err) = std::fs::create_dir_all(parent)
+@@ -1257,6 +1289,7 @@ fn clone_open_skills_repo(repo_dir: &Path) -> bool {
+     }
+ }
+ 
++#[cfg(not(feature = "lath"))]
+ fn pull_open_skills_repo(repo_dir: &Path) -> bool {
+     // If user points to a non-git directory via env var, keep using it without pulling.
+     if !repo_dir.join(".git").exists() {
+@@ -1295,6 +1328,7 @@ fn pull_open_skills_repo(repo_dir: &Path) -> bool {
+     }
+ }
+ 
++#[cfg(not(feature = "lath"))]
+ fn should_sync_open_skills(repo_dir: &Path) -> bool {
+     let marker = repo_dir.join(OPEN_SKILLS_SYNC_MARKER);
+     let Ok(metadata) = std::fs::metadata(marker) else {
+@@ -1310,6 +1344,7 @@ fn should_sync_open_skills(repo_dir: &Path) -> bool {
+     age >= Duration::from_secs(OPEN_SKILLS_SYNC_INTERVAL_SECS)
+ }
+ 
++#[cfg(not(feature = "lath"))]
+ fn mark_open_skills_synced(repo_dir: &Path) -> Result<()> {
+     std::fs::write(repo_dir.join(OPEN_SKILLS_SYNC_MARKER), b"synced")?;
+     Ok(())
+@@ -1865,7 +1900,9 @@ pub(crate) fn skills_to_tools_with_context_and_runtime_optional_nat64(
+     security: std::sync::Arc<crate::security::SecurityPolicy>,
+     unfiltered_registry: &[std::sync::Arc<dyn zeroclaw_api::tool::Tool>],
+     runtime: std::sync::Arc<dyn crate::platform::RuntimeAdapter>,
+-    nat64_prefixes: Option<&[zeroclaw_infra::net_guard::Nat64Prefix]>,
++    #[cfg_attr(feature = "lath", allow(unused_variables))] nat64_prefixes: Option<
++        &[zeroclaw_infra::net_guard::Nat64Prefix],
++    >,
+ ) -> Vec<Box<dyn zeroclaw_api::tool::Tool>> {
+     let mut tools: Vec<Box<dyn zeroclaw_api::tool::Tool>> = Vec::new();
+     for skill in skills {
+@@ -1895,6 +1932,9 @@ pub(crate) fn skills_to_tools_with_context_and_runtime_optional_nat64(
+                         security.clone(),
+                     )));
+                 }
++                // Not compiled in the Lath build, which opens no connection
++                // but its two sockets; an `http` skill tool is skipped below.
++                #[cfg(not(feature = "lath"))]
+                 "http" => {
+                     if let Some(nat64_prefixes) = nat64_prefixes {
+                         tools.push(Box::new(crate::skills::skill_http::SkillHttpTool::new(
+diff --git a/crates/zeroclaw-runtime/src/tools/attribution.rs b/crates/zeroclaw-runtime/src/tools/attribution.rs
+index f9076cb..282c1d3 100644
+--- a/crates/zeroclaw-runtime/src/tools/attribution.rs
++++ b/crates/zeroclaw-runtime/src/tools/attribution.rs
+@@ -11,12 +11,14 @@ use crate::tools::cron_update::CronUpdateTool;
+ use crate::tools::delegate::DelegateTool;
+ use crate::tools::deliver_file::DeliverFileTool;
+ use crate::tools::file_read::FileReadTool;
++#[cfg(not(feature = "lath"))]
+ use crate::tools::model_switch::ModelSwitchTool;
+ use crate::tools::read_skill::ReadSkillTool;
+ use crate::tools::schedule::ScheduleTool;
+ use crate::tools::security_ops::SecurityOpsTool;
+ use crate::tools::send_message_to_peer::SendMessageToPeerTool;
+ use crate::tools::shell::ShellTool;
++#[cfg(not(feature = "lath"))]
+ use crate::tools::skill_http::SkillHttpTool;
+ use crate::tools::skill_manage::{SkillManageTool, SkillViewTool, SkillsListTool};
+ use crate::tools::skill_tool::{SkillBuiltinTool, SkillShellTool};
+@@ -37,12 +39,14 @@ tool_attribution!(CronUpdateTool, ToolKind::Plugin);
+ tool_attribution!(DelegateTool, ToolKind::Plugin);
+ tool_attribution!(DeliverFileTool, ToolKind::Plugin);
+ tool_attribution!(FileReadTool, ToolKind::Plugin);
++#[cfg(not(feature = "lath"))]
+ tool_attribution!(ModelSwitchTool, ToolKind::Plugin);
+ tool_attribution!(ReadSkillTool, ToolKind::Plugin);
+ tool_attribution!(ScheduleTool, ToolKind::Plugin);
+ tool_attribution!(SecurityOpsTool, ToolKind::Plugin);
+ tool_attribution!(SendMessageToPeerTool, ToolKind::Plugin);
+ tool_attribution!(ShellTool, ToolKind::Shell);
++#[cfg(not(feature = "lath"))]
+ tool_attribution!(SkillHttpTool, ToolKind::Plugin, ToolProvenance::Extension);
+ tool_attribution!(SkillsListTool, ToolKind::Plugin);
+ tool_attribution!(SkillViewTool, ToolKind::Plugin);
+diff --git a/crates/zeroclaw-runtime/src/tools/mod.rs b/crates/zeroclaw-runtime/src/tools/mod.rs
+index 1ef65c8..f334885 100644
+--- a/crates/zeroclaw-runtime/src/tools/mod.rs
++++ b/crates/zeroclaw-runtime/src/tools/mod.rs
+@@ -17,6 +17,7 @@ pub mod deliver_file;
+ pub mod file_read;
+ #[cfg(feature = "lath")]
+ pub mod lath_host;
++#[cfg(not(feature = "lath"))]
+ pub mod model_switch;
+ pub mod param_options;
+ pub mod read_skill;
+@@ -28,6 +29,7 @@ pub mod send_message_to_peer;
+ pub mod shell;
+ pub(crate) mod shell_env;
+ pub(crate) mod shell_output;
++#[cfg(not(feature = "lath"))]
+ pub mod skill_http;
+ pub mod skill_manage;
+ pub mod skill_tool;
+@@ -170,12 +172,14 @@ pub use deliver_file::{
+     read_delivered_artifact_bounded,
+ };
+ pub use file_read::FileReadTool;
++#[cfg(not(feature = "lath"))]
+ pub use model_switch::ModelSwitchTool;
+ pub use read_skill::ReadSkillTool;
+ pub use schedule::ScheduleTool;
+ pub use security_ops::SecurityOpsTool;
+ pub use send_message_to_peer::SendMessageToPeerTool;
+ pub use shell::ShellTool;
++#[cfg(not(feature = "lath"))]
+ pub use skill_http::SkillHttpTool;
+ pub use skill_tool::{SkillBuiltinTool, SkillShellTool};
+ pub use sop_advance::SopAdvanceTool;
+@@ -4999,6 +5003,7 @@ permissions = ["http_client"]
+         assert!(!names.contains(&"read_skill"));
+     }
+ 
++    #[cfg(not(feature = "lath"))]
+     fn registry_names(tmp: &TempDir, is_subagent_caller: bool) -> Vec<String> {
+         let security = Arc::new(SecurityPolicy::default());
+         let mem_cfg = MemoryConfig {
+@@ -5035,6 +5040,8 @@ permissions = ["http_client"]
+         .collect()
+     }
+ 
++    // `model_switch` is not compiled in the Lath build.
++    #[cfg(not(feature = "lath"))]
+     #[test]
+     fn model_switch_present_for_top_level_absent_for_subagent() {
+         let tmp = TempDir::new().unwrap();
+diff --git a/src/lath.rs b/src/lath.rs
+index d7e64b5..b6d0c2d 100644
+--- a/src/lath.rs
++++ b/src/lath.rs
+@@ -9,8 +9,8 @@
+ //! is refused with a message that names it, because a step that quietly runs
+ //! with a wider posture than its committed one is worse than a failed step.
+ 
+-use anyhow::{Result, bail};
+-use std::path::PathBuf;
++use anyhow::{Context, Result, bail};
++use std::path::{Path, PathBuf};
+ use zeroclaw_config::schema::Config;
+ 
+ /// The `agent` subcommand's arguments, as the CLI parsed them.
+@@ -60,7 +60,17 @@ pub async fn run_agent(config: Config, args: AgentArgs) -> Result<()> {
+             args.agent
+         );
+     }
++    let raw = std::fs::read_to_string(&config.config_path)
++        .with_context(|| format!("lath: reading {}", config.config_path.display()))?;
++    let raw: toml::Table = raw
++        .parse()
++        .with_context(|| format!("lath: {} does not parse", config.config_path.display()))?;
++    // The provider walk first: its refusals name the exact entry, fallback or
++    // route, where the posture's allow-list would name only the section.
+     zeroclaw_providers::lath::check_config(&config, args.model_provider.as_deref())?;
++    check_posture(&raw)?;
++    check_environment(std::env::vars_os().filter_map(|(name, _)| name.into_string().ok()))?;
++    check_workspace(&config.agent_workspace_dir(&args.agent))?;
+ 
+     let temperature = args.temperature.or_else(|| {
+         config
+@@ -92,6 +102,318 @@ pub async fn run_agent(config: Config, args: AgentArgs) -> Result<()> {
+     .map(|_| ())
+ }
+ 
++/// The eight tool names a Lath posture may allow.
++pub const LATH_TOOLS: [&str; 8] = [
++    "file_read",
++    "file_write",
++    "store_get",
++    "store_set",
++    "solana_slot",
++    "solana_fees",
++    "solana_balance",
++    "lath_verify_chain",
++];
++
++/// The environment a step may carry beyond `HOME`, `TZ` and `LANG`: the two
++/// reproducibility knobs, and the config directory `--config-dir` exports.
++const ALLOWED_ZEROCLAW_ENV: [&str; 3] =
++    ["ZEROCLAW_NOW", "ZEROCLAW_OMIT_HOST", "ZEROCLAW_CONFIG_DIR"];
++
++/// Check a step's config against the one posture the Lath build runs: the
++/// shape of `zeroclaw/CONTRACT.md` §1 in the Lath repository, key for key.
++///
++/// It is an allow-list, not a deny-list: any key the contract does not name
++/// is refused, so an MCP server, a skill bundle, a channel, a delegate, a
++/// plugin, a web tool or a second agent is refused by the same rule as a
++/// typo. Values the posture fixes are checked too: one provider, over its
++/// socket, with a positive `context_window` when one is set; one agent, with
++/// memory `none`; a non-empty `allowed_tools` within the eight; approvals off
++/// at level `full`; no sandbox backend to detect; cost off; no retries; the
++/// host-tool socket and token.
++pub fn check_posture(raw: &toml::Table) -> Result<()> {
++    only(
++        raw,
++        "",
++        &[
++            "schema_version",
++            "locale",
++            "providers",
++            "agents",
++            "risk_profiles",
++            "runtime_profiles",
++            "memory",
++            "cost",
++            "reliability",
++            "lath",
++        ],
++    )?;
++    if raw.get("schema_version").and_then(toml::Value::as_integer) != Some(3) {
++        bail!("lath: `schema_version` must be 3");
++    }
++
++    let providers = table(raw, "providers", "providers")?;
++    only(providers, "providers", &["models"])?;
++    let models = table(providers, "models", "providers.models")?;
++    only(models, "providers.models", &["custom"])?;
++    let (provider_alias, provider) = single(models, "custom", "providers.models.custom")?;
++    let pkey = format!("providers.models.custom.{provider_alias}");
++    only(
++        provider,
++        &pkey,
++        &[
++            "model",
++            "uri",
++            "unix_socket",
++            "api_key",
++            "native_tools",
++            "temperature",
++            "context_window",
++        ],
++    )?;
++    for key in ["model", "uri", "unix_socket", "api_key"] {
++        string(provider, key, &pkey)?;
++    }
++    if provider.get("native_tools").and_then(toml::Value::as_bool) != Some(true) {
++        bail!("lath: `{pkey}.native_tools` must be true: the Lath tools are native tool calls");
++    }
++    // The host writes the model's real window here, per step; unset, upstream
++    // runs against its 32k compatibility fallback and refuses a turn above it
++    // before dispatch. Zero would silently mean that same fallback, and a
++    // float or a string is a host bug, so anything but a positive integer stops.
++    if let Some(window) = provider.get("context_window")
++        && window.as_integer().is_none_or(|n| n <= 0)
++    {
++        bail!(
++            "lath: refused `{pkey}.context_window = {window}`: it must be a positive integer, \
++             the model's context window in tokens"
++        );
++    }
++
++    let agents = table(raw, "agents", "agents")?;
++    let (agent_alias, agent) = single_entry(agents, "agents")?;
++    let akey = format!("agents.{agent_alias}");
++    only(
++        agent,
++        &akey,
++        &[
++            "enabled",
++            "model_provider",
++            "risk_profile",
++            "runtime_profile",
++            "workspace",
++            "memory",
++        ],
++    )?;
++    let expected_provider = format!("custom.{provider_alias}");
++    if string(agent, "model_provider", &akey)? != expected_provider {
++        bail!("lath: `{akey}.model_provider` must be `{expected_provider}`");
++    }
++    let workspace = table(agent, "workspace", &format!("{akey}.workspace"))?;
++    only(workspace, &format!("{akey}.workspace"), &["path"])?;
++    let path = string(workspace, "path", &format!("{akey}.workspace"))?;
++    if !Path::new(path).is_absolute() {
++        bail!(
++            "lath: refused `{akey}.workspace.path = \"{path}\"`: the workspace path must be absolute"
++        );
++    }
++    memory_none(agent, &akey)?;
++
++    let risk_name = string(agent, "risk_profile", &akey)?;
++    let risks = table(raw, "risk_profiles", "risk_profiles")?;
++    let (risk_alias, risk) = single_entry(risks, "risk_profiles")?;
++    if risk_alias != risk_name {
++        bail!("lath: `{akey}.risk_profile` must name `risk_profiles.{risk_alias}`");
++    }
++    let rkey = format!("risk_profiles.{risk_alias}");
++    only(
++        risk,
++        &rkey,
++        &[
++            "level",
++            "workspace_only",
++            "allowed_tools",
++            "always_ask",
++            "sandbox_enabled",
++        ],
++    )?;
++    if string(risk, "level", &rkey)? != "full" {
++        bail!("lath: `{rkey}.level` must be \"full\": a step has no one to ask for approval");
++    }
++    if risk.get("workspace_only").and_then(toml::Value::as_bool) != Some(true) {
++        bail!("lath: `{rkey}.workspace_only` must be true");
++    }
++    if risk.get("sandbox_enabled").and_then(toml::Value::as_bool) != Some(false) {
++        bail!(
++            "lath: `{rkey}.sandbox_enabled` must be false: the host's wrapper is the sandbox, \
++             and nothing is spawned to detect another"
++        );
++    }
++    if let Some(ask) = risk.get("always_ask")
++        && !ask.as_array().is_some_and(Vec::is_empty)
++    {
++        bail!("lath: `{rkey}.always_ask` must be empty: a step has no one to ask");
++    }
++    let tools = risk
++        .get("allowed_tools")
++        .and_then(toml::Value::as_array)
++        .with_context(|| format!("lath: `{rkey}.allowed_tools` is required"))?;
++    if tools.is_empty() {
++        bail!(
++            "lath: `{rkey}.allowed_tools` is empty, which upstream reads as unrestricted: \
++             name the tools the step may use"
++        );
++    }
++    let mut seen = std::collections::HashSet::new();
++    for tool in tools {
++        let name = tool
++            .as_str()
++            .with_context(|| format!("lath: `{rkey}.allowed_tools` holds a non-string"))?;
++        if !LATH_TOOLS.contains(&name) {
++            bail!(
++                "lath: refused tool `{name}` in `{rkey}.allowed_tools`: the Lath build offers \
++                 only {}",
++                LATH_TOOLS.join(", ")
++            );
++        }
++        if !seen.insert(name) {
++            bail!("lath: `{name}` appears twice in `{rkey}.allowed_tools`");
++        }
++    }
++
++    let runtime_name = string(agent, "runtime_profile", &akey)?;
++    let runtimes = table(raw, "runtime_profiles", "runtime_profiles")?;
++    let (runtime_alias, runtime) = single_entry(runtimes, "runtime_profiles")?;
++    if runtime_alias != runtime_name {
++        bail!("lath: `{akey}.runtime_profile` must name `runtime_profiles.{runtime_alias}`");
++    }
++    only(
++        runtime,
++        &format!("runtime_profiles.{runtime_alias}"),
++        &["max_tool_iterations"],
++    )?;
++
++    memory_none(raw, "")?;
++    let cost = table(raw, "cost", "cost")?;
++    only(cost, "cost", &["enabled"])?;
++    if cost.get("enabled").and_then(toml::Value::as_bool) != Some(false) {
++        bail!("lath: `cost.enabled` must be false: the host meters the step");
++    }
++    let reliability = table(raw, "reliability", "reliability")?;
++    only(reliability, "reliability", &["provider_retries"])?;
++    if reliability
++        .get("provider_retries")
++        .and_then(toml::Value::as_integer)
++        != Some(0)
++    {
++        bail!("lath: refused `reliability.provider_retries`: it must be 0");
++    }
++
++    let lath = table(raw, "lath", "lath")?;
++    only(lath, "lath", &["tools_socket", "tools_token"])?;
++    let socket = string(lath, "tools_socket", "lath")?;
++    if !Path::new(socket).is_absolute() {
++        bail!("lath: refused `lath.tools_socket = \"{socket}\"`: the socket path must be absolute");
++    }
++    string(lath, "tools_token", "lath")?;
++    Ok(())
++}
++
++/// Refuse the environment a step must not carry: any `ZEROCLAW_*` variable
++/// but the three the host sets. `ZEROCLAW_OPEN_SKILLS_*` would clone a
++/// repository and beats config upstream; any other `ZEROCLAW_<path>`
++/// overrides a config value after the posture was written.
++pub fn check_environment<I: IntoIterator<Item = String>>(names: I) -> Result<()> {
++    let mut names: Vec<String> = names.into_iter().collect();
++    names.sort();
++    for name in names {
++        if name.starts_with("ZEROCLAW_") && !ALLOWED_ZEROCLAW_ENV.contains(&name.as_str()) {
++            bail!(
++                "lath: refused environment variable `{name}`: a step's environment is HOME, TZ, \
++                 LANG, ZEROCLAW_NOW and ZEROCLAW_OMIT_HOST"
++            );
++        }
++    }
++    Ok(())
++}
++
++/// Refuse a workspace that holds a `skills/` entry: upstream loads it as
++/// workspace skills, and a skill can re-expose a shell or HTTP tool.
++pub fn check_workspace(workspace: &Path) -> Result<()> {
++    let skills = workspace.join("skills");
++    if skills.symlink_metadata().is_ok() {
++        bail!(
++            "lath: refused `{}`: the Lath build loads no skill, and a workspace skills \
++             directory would be one",
++            skills.display()
++        );
++    }
++    Ok(())
++}
++
++fn only(t: &toml::Table, prefix: &str, allowed: &[&str]) -> Result<()> {
++    let mut keys: Vec<&String> = t.keys().collect();
++    keys.sort();
++    for key in keys {
++        if !allowed.contains(&key.as_str()) {
++            if prefix.is_empty() {
++                bail!("lath: refused config key `{key}`: not part of the Lath posture");
++            }
++            bail!("lath: refused config key `{prefix}.{key}`: not part of the Lath posture");
++        }
++    }
++    Ok(())
++}
++
++fn table<'a>(t: &'a toml::Table, key: &str, name: &str) -> Result<&'a toml::Table> {
++    t.get(key)
++        .and_then(toml::Value::as_table)
++        .with_context(|| format!("lath: `[{name}]` is required"))
++}
++
++fn string<'a>(t: &'a toml::Table, key: &str, prefix: &str) -> Result<&'a str> {
++    t.get(key)
++        .and_then(toml::Value::as_str)
++        .filter(|s| !s.trim().is_empty())
++        .with_context(|| format!("lath: `{prefix}.{key}` is required"))
++}
++
++fn single_entry<'a>(t: &'a toml::Table, name: &str) -> Result<(&'a str, &'a toml::Table)> {
++    let mut entries = t.iter();
++    let Some((alias, value)) = entries.next() else {
++        bail!("lath: `[{name}]` needs exactly one entry");
++    };
++    if entries.next().is_some() {
++        let all: Vec<&str> = t.keys().map(String::as_str).collect();
++        bail!(
++            "lath: refused `{name}` with {} entries ({}): the Lath posture has exactly one",
++            all.len(),
++            all.join(", ")
++        );
++    }
++    let entry = value
++        .as_table()
++        .with_context(|| format!("lath: `{name}.{alias}` must be a table"))?;
++    Ok((alias.as_str(), entry))
++}
++
++fn single<'a>(t: &'a toml::Table, key: &str, name: &str) -> Result<(&'a str, &'a toml::Table)> {
++    single_entry(table(t, key, name)?, name)
++}
++
++fn memory_none(t: &toml::Table, prefix: &str) -> Result<()> {
++    let name = if prefix.is_empty() {
++        "memory".to_string()
++    } else {
++        format!("{prefix}.memory")
++    };
++    let memory = table(t, "memory", &name)?;
++    only(memory, &name, &["backend"])?;
++    if string(memory, "backend", &name)? != "none" {
++        bail!("lath: `{name}.backend` must be \"none\": the chain is the memory across steps");
++    }
++    Ok(())
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+@@ -129,6 +451,376 @@ mod tests {
+         assert!(err.contains("/tmp/s.json"), "{err}");
+     }
+ 
++    /// The contract's config (CONTRACT.md §1), with its placeholders filled.
++    const CONTRACT: &str = r#"
++schema_version = 3
++locale = "en"
++
++[providers.models.custom.lath]
++model = "deepseek/deepseek-v4.1-flash"
++uri = "http://localhost/v1"
++unix_socket = "/lath/m.sock"
++api_key = "tok"
++native_tools = true
++temperature = 0.2
++
++[agents.lath]
++enabled = true
++model_provider = "custom.lath"
++risk_profile = "lath"
++runtime_profile = "lath"
++
++[agents.lath.workspace]
++path = "/lath/work"
++
++[agents.lath.memory]
++backend = "none"
++
++[risk_profiles.lath]
++level = "full"
++workspace_only = true
++allowed_tools = ["file_read", "file_write", "store_get"]
++always_ask = []
++sandbox_enabled = false
++
++[runtime_profiles.lath]
++max_tool_iterations = 16
++
++[memory]
++backend = "none"
++
++[cost]
++enabled = false
++
++[reliability]
++provider_retries = 0
++
++[lath]
++tools_socket = "/lath/t.sock"
++tools_token = "tok"
++"#;
++
++    fn posture(edit: impl FnOnce(&mut toml::Table)) -> Result<()> {
++        let mut raw: toml::Table = CONTRACT.parse().unwrap();
++        edit(&mut raw);
++        check_posture(&raw)
++    }
++
++    fn refused(edit: impl FnOnce(&mut toml::Table), needle: &str) {
++        let err = posture(edit).unwrap_err().to_string();
++        assert!(err.contains(needle), "expected `{needle}` in: {err}");
++    }
++
++    fn at<'a>(raw: &'a mut toml::Table, path: &[&str]) -> &'a mut toml::Table {
++        let mut t = raw;
++        for key in path {
++            t = t.get_mut(*key).unwrap().as_table_mut().unwrap();
++        }
++        t
++    }
++
++    fn set(raw: &mut toml::Table, path: &[&str], key: &str, value: toml::Value) {
++        at(raw, path).insert(key.into(), value);
++    }
++
++    fn parsed(src: &str) -> toml::Table {
++        src.parse().unwrap()
++    }
++
++    fn strings(items: &[&str]) -> toml::Value {
++        toml::Value::Array(items.iter().map(|s| toml::Value::from(*s)).collect())
++    }
++
++    #[test]
++    fn the_contract_config_is_the_posture() {
++        posture(|_| {}).unwrap();
++    }
++
++    #[test]
++    fn a_second_provider_family_is_refused_by_name() {
++        refused(
++            |raw| {
++                let family = parsed("[default]\nmodel = \"x\"");
++                set(raw, &["providers", "models"], "openrouter", family.into());
++            },
++            "providers.models.openrouter",
++        );
++    }
++
++    #[test]
++    fn a_second_custom_provider_is_refused_by_name() {
++        refused(
++            |raw| {
++                let entry = parsed("model = \"x\"");
++                set(
++                    raw,
++                    &["providers", "models", "custom"],
++                    "other",
++                    entry.into(),
++                );
++            },
++            "providers.models.custom",
++        );
++    }
++
++    #[test]
++    fn a_context_window_is_accepted_as_a_positive_integer() {
++        posture(|raw| {
++            let path = ["providers", "models", "custom", "lath"];
++            set(raw, &path, "context_window", toml::Value::Integer(163_840));
++        })
++        .unwrap();
++    }
++
++    #[test]
++    fn a_context_window_that_is_not_a_positive_integer_is_refused() {
++        for value in [
++            toml::Value::Integer(0),
++            toml::Value::Integer(-1),
++            toml::Value::Float(128_000.0),
++            toml::Value::from("128000"),
++        ] {
++            refused(
++                |raw| {
++                    let path = ["providers", "models", "custom", "lath"];
++                    set(raw, &path, "context_window", value);
++                },
++                "providers.models.custom.lath.context_window",
++            );
++        }
++    }
++
++    #[test]
++    fn a_fallback_is_refused_by_name() {
++        refused(
++            |raw| {
++                let path = ["providers", "models", "custom", "lath"];
++                set(raw, &path, "fallback", strings(&["custom.b"]));
++            },
++            "providers.models.custom.lath.fallback",
++        );
++    }
++
++    #[test]
++    fn a_route_is_refused_by_name() {
++        refused(
++            |raw| {
++                raw.insert("model_routes".into(), toml::Value::Array(vec![]));
++            },
++            "model_routes",
++        );
++    }
++
++    #[test]
++    fn a_tool_outside_the_eight_is_refused_by_name() {
++        for tool in [
++            "shell",
++            "http_request",
++            "web_fetch",
++            "delegate",
++            "lattice_verify_chain",
++        ] {
++            refused(
++                |raw| {
++                    let tools = strings(&["file_read", tool]);
++                    set(raw, &["risk_profiles", "lath"], "allowed_tools", tools);
++                },
++                tool,
++            );
++        }
++    }
++
++    #[test]
++    fn empty_allowed_tools_is_refused() {
++        refused(
++            |raw| {
++                set(
++                    raw,
++                    &["risk_profiles", "lath"],
++                    "allowed_tools",
++                    strings(&[]),
++                )
++            },
++            "allowed_tools",
++        );
++    }
++
++    #[test]
++    fn mcp_skills_channels_delegates_plugins_and_web_tools_are_refused_by_name() {
++        for key in [
++            "mcp",
++            "mcp_bundles",
++            "skills",
++            "skill_bundles",
++            "channels",
++            "delegate",
++            "plugins",
++            "web_search",
++            "web_fetch",
++            "http_request",
++            "browser",
++            "composio",
++            "gateway",
++            "proxy",
++            "multimodal",
++        ] {
++            refused(
++                |raw| {
++                    raw.insert(key.into(), toml::Table::new().into());
++                },
++                key,
++            );
++        }
++        refused(
++            |raw| set(raw, &["agents", "lath"], "mcp_bundles", strings(&["web"])),
++            "agents.lath.mcp_bundles",
++        );
++        refused(
++            |raw| set(raw, &["agents", "lath"], "skill_bundles", strings(&["b"])),
++            "agents.lath.skill_bundles",
++        );
++    }
++
++    #[test]
++    fn a_second_agent_is_refused_by_name() {
++        refused(
++            |raw| {
++                let agent = parsed("model_provider = \"custom.lath\"");
++                set(raw, &["agents"], "other", agent.into());
++            },
++            "(lath, other)",
++        );
++    }
++
++    #[test]
++    fn memory_cost_retries_approvals_and_sandbox_are_pinned() {
++        refused(
++            |raw| set(raw, &["memory"], "backend", "sqlite".into()),
++            "memory.backend",
++        );
++        refused(
++            |raw| {
++                set(
++                    raw,
++                    &["agents", "lath", "memory"],
++                    "backend",
++                    "markdown".into(),
++                )
++            },
++            "agents.lath.memory.backend",
++        );
++        refused(
++            |raw| set(raw, &["cost"], "enabled", true.into()),
++            "cost.enabled",
++        );
++        refused(
++            |raw| set(raw, &["reliability"], "provider_retries", 1.into()),
++            "provider_retries",
++        );
++        refused(
++            |raw| {
++                set(
++                    raw,
++                    &["risk_profiles", "lath"],
++                    "sandbox_enabled",
++                    true.into(),
++                )
++            },
++            "sandbox_enabled",
++        );
++        refused(
++            |raw| {
++                at(raw, &["risk_profiles", "lath"]).remove("sandbox_enabled");
++            },
++            "sandbox_enabled",
++        );
++        refused(
++            |raw| {
++                set(
++                    raw,
++                    &["risk_profiles", "lath"],
++                    "level",
++                    "supervised".into(),
++                )
++            },
++            "level",
++        );
++        refused(
++            |raw| {
++                set(
++                    raw,
++                    &["risk_profiles", "lath"],
++                    "always_ask",
++                    strings(&["file_write"]),
++                )
++            },
++            "always_ask",
++        );
++        refused(
++            |raw| {
++                set(
++                    raw,
++                    &["risk_profiles", "lath"],
++                    "sandbox_backend",
++                    "auto".into(),
++                )
++            },
++            "sandbox_backend",
++        );
++    }
++
++    #[test]
++    fn the_host_tool_socket_is_required_and_absolute() {
++        refused(
++            |raw| {
++                raw.remove("lath");
++            },
++            "[lath]",
++        );
++        refused(
++            |raw| set(raw, &["lath"], "tools_socket", "t.sock".into()),
++            "t.sock",
++        );
++        refused(
++            |raw| {
++                at(raw, &["lath"]).remove("tools_token");
++            },
++            "lath.tools_token",
++        );
++    }
++
++    #[test]
++    fn open_skills_and_config_overrides_in_the_environment_are_refused_by_name() {
++        let allowed = [
++            "HOME",
++            "TZ",
++            "LANG",
++            "ZEROCLAW_NOW",
++            "ZEROCLAW_OMIT_HOST",
++            "ZEROCLAW_CONFIG_DIR",
++        ];
++        check_environment(allowed.map(String::from)).unwrap();
++        for name in [
++            "ZEROCLAW_OPEN_SKILLS_ENABLED",
++            "ZEROCLAW_OPEN_SKILLS_DIR",
++            "ZEROCLAW_web_search__enabled",
++        ] {
++            let err = check_environment(["HOME".to_string(), name.to_string()])
++                .unwrap_err()
++                .to_string();
++            assert!(err.contains(name), "{err}");
++        }
++    }
++
++    #[test]
++    fn a_workspace_skills_directory_is_refused() {
++        let dir = tempfile::tempdir().unwrap();
++        check_workspace(dir.path()).unwrap();
++        std::fs::create_dir(dir.path().join("skills")).unwrap();
++        let err = check_workspace(dir.path()).unwrap_err().to_string();
++        assert!(err.contains("skills"), "{err}");
++    }
++
+     #[test]
+     fn a_peripheral_is_refused_by_name() {
+         let args = AgentArgs {
+diff --git a/src/memory/mod.rs b/src/memory/mod.rs
+index 897d33d..7206d20 100644
+--- a/src/memory/mod.rs
++++ b/src/memory/mod.rs
+@@ -3,7 +3,9 @@ pub use zeroclaw_memory::*;
+ // These stay in root (depend on root crate types).
+ pub mod cli;
+ 
+-#[cfg(test)]
++// The battle tests name `rusqlite`, a direct dependency only `agent-runtime`
++// brings; the Lath build's test run skips them rather than add the edge.
++#[cfg(all(test, any(feature = "agent-runtime", not(feature = "lath"))))]
+ mod battle_tests;
+ 
+ // Re-declare traits as a file module so its #[cfg(test)] block compiles.
+-- 
+2.50.1 (Apple Git-155)
+

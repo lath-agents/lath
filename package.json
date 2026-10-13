@@ -1,0 +1,64 @@
+{
+  "name": "lath",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Lath is payment and storage infrastructure for autonomous AI agents on Solana.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "anchor build",
+    "lint": "prettier \"**/*.{ts,tsx}\" --check",
+    "lint:fix": "prettier \"**/*.{ts,tsx}\" -w",
+    "sdk:sync": "node sdk/scripts/sync-idl.mjs",
+    "sdk:sync:check": "node sdk/scripts/sync-idl.mjs --check",
+    "sdk:build": "npm --prefix sdk run build",
+    "sdk:pack": "cd sdk && npm pack --pack-destination ..",
+    "runtime:build": "npm --prefix runtime run build",
+    "test:devnet": "ts-mocha --paths -p ./tsconfig.json -t 300000 tests/devnet.ts",
+    "audit": "ts-node -r tsconfig-paths/register -P ./tsconfig.json scripts/audit.ts",
+    "verify:bundle": "ts-node -r tsconfig-paths/register -P ./tsconfig.json scripts/verify-bundle.ts",
+    "bench": "ts-node -r tsconfig-paths/register -P ./tsconfig.json scripts/bench.ts",
+    "dev:devnet": "scripts/dev-devnet.sh",
+    "test:irys": "ts-mocha --paths -p ./tsconfig.json -t 600000 tests/irys.ts",
+    "irys": "ts-node -r tsconfig-paths/register -P ./tsconfig.json scripts/irys.ts",
+    "tempo:stats": "ts-node -r tsconfig-paths/register -P ./tsconfig.json scripts/tempo-stats.ts",
+    "evidence": "ts-node -r tsconfig-paths/register -P ./tsconfig.json scripts/evidence/index.ts",
+    "tempo:access-key-probe": "ts-node -r tsconfig-paths/register -P ./tsconfig.json scripts/tempo-access-key-probe.ts",
+    "demo-attest:seed": "ts-node -r tsconfig-paths/register -P ./tsconfig.json scripts/demo-attest/seed.ts",
+    "demo-attest:authorize": "ts-node -r tsconfig-paths/register -P ./tsconfig.json scripts/demo-attest/authorize.ts"
+  },
+  "dependencies": {
+    "@coral-xyz/anchor": "0.31.1",
+    "@irys/upload": "0.0.15",
+    "@irys/upload-solana": "0.1.8",
+    "@lightprotocol/stateless.js": "0.23.3",
+    "@noble/hashes": "^1.8.0",
+    "@solana/web3.js": "^1.98.0",
+    "bn.js": "^5.2.1",
+    "bs58": "^5.0.0",
+    "mppx": "^0.10.1",
+    "viem": "2.56.5"
+  },
+  "overrides": {
+    "axios": ">=1.19.1",
+    "ws": "^8.20.2"
+  },
+  "devDependencies": {
+    "@lightprotocol/zk-compression-cli": "0.28.4",
+    "@solana/spl-token": "^0.4.15",
+    "@sqds/multisig": "2.1.4",
+    "@types/bn.js": "^5.1.0",
+    "@types/chai": "^4.3.0",
+    "@types/mocha": "^9.0.0",
+    "@types/node": "^20.0.0",
+    "chai": "^4.3.4",
+    "mocha": "^9.0.3",
+    "prettier": "^2.6.2",
+    "ts-mocha": "^10.1.0",
+    "ts-node": "^10.9.2",
+    "tsconfig-paths": "^3.15.0",
+    "tsup": "^8.5.1",
+    "typescript": "^5.4.0"
+  }
+}

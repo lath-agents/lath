@@ -1,0 +1,71 @@
+{
+  "name": "@lath/sdk",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for Lath: payment and storage infrastructure for autonomous AI agents on Solana",
+  "license": "MIT",
+  "type": "commonjs",
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "lath-audit": "./bin/lath-audit.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    },
+    "./browser": {
+      "types": "./dist/browser.d.ts",
+      "import": "./dist/browser.mjs",
+      "require": "./dist/browser.js"
+    },
+    "./cli": {
+      "types": "./dist/cli.d.ts",
+      "import": "./dist/cli.mjs",
+      "require": "./dist/cli.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "bin",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "sync": "node scripts/sync-idl.mjs",
+    "build": "node scripts/sync-idl.mjs && tsup",
+    "prepack": "npm run build"
+  },
+  "peerDependencies": {
+    "@coral-xyz/anchor": "0.31.1",
+    "@lightprotocol/stateless.js": "0.23.3",
+    "@solana/web3.js": "^1.98.0"
+  },
+  "dependencies": {
+    "@irys/upload": "0.0.15",
+    "@irys/upload-solana": "0.1.8",
+    "@noble/hashes": "^1.8.0",
+    "bs58": "^5.0.0"
+  },
+  "optionalDependencies": {
+    "viem": "^2.56.5"
+  },
+  "devDependencies": {
+    "tsup": "^8.5.1",
+    "typescript": "^5.4.0"
+  },
+  "keywords": [
+    "solana",
+    "anchor",
+    "zk-compression",
+    "light-protocol",
+    "agents",
+    "audit-log"
+  ]
+}

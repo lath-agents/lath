@@ -1,0 +1,73 @@
+[
+  {
+    "status": 200,
+    "body": {
+      "id": "gen-fixture-parent-1",
+      "model": "anthropic/claude-sonnet-5",
+      "choices": [
+        {
+          "index": 0,
+          "finish_reason": "tool_calls",
+          "message": {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "call_1",
+                "type": "function",
+                "function": { "name": "lookup", "arguments": "{\"symbol\":\"SOL\"}" }
+              }
+            ]
+          }
+        }
+      ],
+      "usage": { "prompt_tokens": 812, "completion_tokens": 41, "total_tokens": 853, "cost": 0.0031415 }
+    }
+  },
+  {
+    "status": 200,
+    "body": {
+      "id": "gen-fixture-parent-2",
+      "model": "anthropic/claude-sonnet-5",
+      "choices": [
+        {
+          "index": 0,
+          "finish_reason": "tool_calls",
+          "message": {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "call_2",
+                "type": "function",
+                "function": {
+                  "name": "delegate",
+                  "arguments": "{\"agent\":\"researcher\",\"task\":\"summarise the last three SOL governance votes\",\"scope\":{\"tools\":[\"lookup\"]}}"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "usage": { "prompt_tokens": 940, "completion_tokens": 63, "total_tokens": 1003, "cost": 0.0042 }
+    }
+  },
+  {
+    "status": 200,
+    "body": {
+      "id": "gen-fixture-parent-3",
+      "model": "anthropic/claude-sonnet-5",
+      "choices": [
+        {
+          "index": 0,
+          "finish_reason": "stop",
+          "message": {
+            "role": "assistant",
+            "content": "SOL is trading at 180 USD; the researcher found three governance votes, all passed."
+          }
+        }
+      ],
+      "usage": { "prompt_tokens": 1104, "completion_tokens": 28, "total_tokens": 1132, "cost": 0.00205 }
+    }
+  }
+]

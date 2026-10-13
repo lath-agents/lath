@@ -1,0 +1,54 @@
+{
+  "name": "@lath/runtime",
+  "version": "0.1.0",
+  "description": "Agent runtime over the Lath payment and storage infrastructure",
+  "license": "MIT",
+  "type": "commonjs",
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    },
+    "./plugins": {
+      "types": "./dist/plugins/index.d.ts",
+      "import": "./dist/plugins/index.mjs",
+      "require": "./dist/plugins/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsup"
+  },
+  "dependencies": {
+    "bs58": "^5.0.0",
+    "mppx": "^0.10.1",
+    "viem": "^2.56.5"
+  },
+  "peerDependencies": {
+    "@lath/sdk": "0.1.0",
+    "@solana/web3.js": "^1.98.0"
+  },
+  "devDependencies": {
+    "tsup": "^8.5.1",
+    "typescript": "^5.4.0"
+  },
+  "keywords": [
+    "solana",
+    "openrouter",
+    "agents",
+    "audit-log",
+    "lath"
+  ]
+}

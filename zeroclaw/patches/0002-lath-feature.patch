@@ -1,0 +1,793 @@
+From d7c5db3e2478594577d3fc73cf7f283cb5b85d8e Mon Sep 17 00:00:00 2001
+From: Lath <lath.solana@gmail.com>
+Date: Thu, 24 Sep 2026 17:13:45 -0300
+Subject: [PATCH 2/6] lath: a build feature for the one-shot agent over one
+ custom provider
+
+Adds the `lath` feature: --no-default-features --features lath builds the `agent -a <alias> -m <message>` path with channels, eval, the gateway and the WASM host out of the dependency graph, and refuses to compile beside a feature that would put a network client, a process spawner or the plugin host back. Every provider family but `custom` is refused at create_model_provider_inner, and a startup walk refuses any other family, fallback, route, kind override, responses wire or -p by name; the legacy custom:<url> form and remote image downloads are refused too. With the feature off nothing changes.
+---
+ Cargo.toml                                  |  14 +
+ crates/zeroclaw-config/Cargo.toml           |   3 +
+ crates/zeroclaw-providers/Cargo.toml        |   2 +
+ crates/zeroclaw-providers/src/lath.rs       | 284 ++++++++++++++++++++
+ crates/zeroclaw-providers/src/lib.rs        |  19 ++
+ crates/zeroclaw-providers/src/multimodal.rs |  28 +-
+ crates/zeroclaw-runtime/Cargo.toml          |   3 +
+ crates/zeroclaw-runtime/src/lib.rs          |  18 ++
+ crates/zeroclaw-tools/Cargo.toml            |   2 +
+ src/lath.rs                                 | 141 ++++++++++
+ src/lib.rs                                  |  31 +++
+ src/main.rs                                 |  49 +++-
+ 12 files changed, 588 insertions(+), 6 deletions(-)
+ create mode 100644 crates/zeroclaw-providers/src/lath.rs
+ create mode 100644 src/lath.rs
+
+diff --git a/Cargo.toml b/Cargo.toml
+index e788c8e..5953589 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -198,6 +198,7 @@ non_row_features = [
+     "landlock",
+     "metrics",
+     "embedded-web",
++    "lath",
+ ]
+ # Features intentionally added to the lean Cargo defaults for standard
+ # distribution artifacts. This list is the complete positive policy beyond
+@@ -377,6 +378,19 @@ plugins-wasm-runtime-only = ["plugins-wasm", "zeroclaw-plugins/plugins-wasmtime"
+ plugins-wasm-cranelift    = ["plugins-wasm", "zeroclaw-plugins/plugins-wasm-cranelift", "zeroclaw-runtime/plugins-wasm-cranelift"]
+ plugins-wasm-pulley       = ["plugins-wasm", "zeroclaw-plugins/plugins-wasm-pulley"]
+ 
++# The Lath build (`--no-default-features --features lath`): the one-shot `agent -a <alias>
++# -m <message>` path over a single `custom` provider, and nothing else. Channels, eval, the
++# gateway and the WASM plugin host are not in its dependency graph; the member crates' own
++# `lath` features narrow what is left (providers refused but `custom`, the Lath tool
++# registry, fail-loud config). `src/lib.rs` refuses to compile it beside a feature that
++# would widen what the binary can reach.
++lath = [
++    "dep:zeroclaw-runtime",
++    "zeroclaw-runtime/lath",
++    "zeroclaw-providers/lath",
++    "zeroclaw-config/lath",
++]
++
+ # CI meta-feature
+ ci-all = [
+     "agent-runtime",
+diff --git a/crates/zeroclaw-config/Cargo.toml b/crates/zeroclaw-config/Cargo.toml
+index f3d4ff3..eb89ab5 100644
+--- a/crates/zeroclaw-config/Cargo.toml
++++ b/crates/zeroclaw-config/Cargo.toml
+@@ -79,3 +79,6 @@ ws-transport = [
+ # Test-only fault-injection hooks (post-replace sync failure). Enabled by
+ # downstream dev-dependencies only; never by a production dependency.
+ test-helpers = []
++# The Lath build: config problems are fatal instead of warnings, and nothing is
++# written on load.
++lath = []
+diff --git a/crates/zeroclaw-providers/Cargo.toml b/crates/zeroclaw-providers/Cargo.toml
+index 02d3bd3..92867d1 100644
+--- a/crates/zeroclaw-providers/Cargo.toml
++++ b/crates/zeroclaw-providers/Cargo.toml
+@@ -57,3 +57,5 @@ windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+ [features]
+ default = []
+ test-helpers = []
++# The Lath build: every family but `custom` refused at construction.
++lath = ["zeroclaw-config/lath"]
+diff --git a/crates/zeroclaw-providers/src/lath.rs b/crates/zeroclaw-providers/src/lath.rs
+new file mode 100644
+index 0000000..4fcf266
+--- /dev/null
++++ b/crates/zeroclaw-providers/src/lath.rs
+@@ -0,0 +1,284 @@
++//! The Lath build's provider posture: one `custom` provider, and nothing else.
++//!
++//! Every provider family stays linked in the Lath build, because the families
++//! share helpers `custom` needs (`compatible.rs` uses `anthropic::CacheControl`,
++//! `models_dev` and `openrouter_catalog`; `reliable.rs` names the Anthropic
++//! provider). So the other families are refused where they would be built
++//! rather than compiled out:
++//!
++//! - [`check_construction`] runs at the top of `create_model_provider_inner`,
++//!   the single function every provider construction passes through, so a
++//!   fallback, a route or a model switch that reaches a second family mid-turn
++//!   fails there;
++//! - [`check_config`] walks, at startup, every place the config or the command
++//!   line can name a provider, so a misconfigured step fails before its first
++//!   request with the offending key in the error, instead of on the one path
++//!   that happens to reach it.
++//!
++//! Every refusal names what it refused: the host turns a non-zero exit into a
++//! failed step and shows the message, so the message is the diagnosis.
++
++use anyhow::{Result, bail};
++use zeroclaw_config::schema::{Config, WireApi};
++
++/// The only provider family the Lath build constructs.
++pub const LATH_PROVIDER_FAMILY: &str = "custom";
++
++/// Refuse a provider construction the Lath build does not allow.
++///
++/// `raw_name` is the name as the caller passed it (a legacy `custom:<url>`
++/// still carries its colon here), `provider_kind` the canonical family after
++/// any `kind` override, and `wire_api` the resolved wire protocol.
++pub fn check_construction(
++    raw_name: &str,
++    provider_kind: &str,
++    wire_api: Option<&str>,
++) -> Result<()> {
++    // `custom:https://…` names an endpoint in the provider name itself, which
++    // no config key records and the startup walk cannot see.
++    if raw_name.contains(':') {
++        bail!(
++            "lath: refused model provider `{raw_name}`: the legacy `<family>:<url>` form is not \
++             accepted; configure `[providers.models.custom.<alias>]` instead"
++        );
++    }
++    if provider_kind != LATH_PROVIDER_FAMILY {
++        bail!(
++            "lath: refused model provider `{provider_kind}`: the Lath build reaches the model \
++             only through one `custom` provider"
++        );
++    }
++    if wire_api == Some(WireApi::Responses.as_str()) {
++        bail!(
++            "lath: refused `wire_api = \"responses\"` on `{raw_name}`: the Lath build speaks \
++             chat completions only"
++        );
++    }
++    Ok(())
++}
++
++/// Walk every provider the config or the command line can name, and refuse
++/// the first one the Lath build would not construct.
++///
++/// `provider_override` is `agent -p`: the host never passes it, so any value
++/// is refused rather than resolved.
++pub fn check_config(config: &Config, provider_override: Option<&str>) -> Result<()> {
++    if let Some(p) = provider_override {
++        bail!(
++            "lath: refused `--model-provider {p}`: the provider is the agent's own, from \
++             config, and is not overridden on the command line"
++        );
++    }
++    for (family, alias, entry) in config.providers.models.iter_entries() {
++        if family != LATH_PROVIDER_FAMILY {
++            bail!(
++                "lath: refused provider `providers.models.{family}.{alias}`: the Lath build \
++                 reaches the model only through one `custom` provider"
++            );
++        }
++        if let Some(kind) = entry
++            .kind
++            .as_deref()
++            .map(str::trim)
++            .filter(|k| !k.is_empty())
++            && crate::canonicalize_v2_model_provider_name(kind) != LATH_PROVIDER_FAMILY
++        {
++            bail!("lath: refused `providers.models.{family}.{alias}.kind = \"{kind}\"`");
++        }
++        if let Some(first) = entry.fallback.first() {
++            bail!(
++                "lath: refused fallback `{first}` on `providers.models.{family}.{alias}`: \
++                 a step has one provider and no fallback"
++            );
++        }
++        if let Some(first) = entry.fallback_models.first() {
++            bail!(
++                "lath: refused fallback model `{first}` on `providers.models.{family}.{alias}`: \
++                 a step has one model and no fallback"
++            );
++        }
++        if entry.wire_api == Some(WireApi::Responses) {
++            bail!(
++                "lath: refused `providers.models.{family}.{alias}.wire_api = \"responses\"`: \
++                 the Lath build speaks chat completions only"
++            );
++        }
++    }
++    if let Some(route) = config.model_routes.first() {
++        bail!(
++            "lath: refused model route `{}` (to `{}`): a step has one provider and no routes",
++            route.hint,
++            route.model_provider
++        );
++    }
++    if let Some(route) = config.embedding_routes.first() {
++        bail!(
++            "lath: refused embedding route `{}` (to `{}`): a step has one provider and no routes",
++            route.hint,
++            route.model_provider
++        );
++    }
++    if let Some((family, alias, _)) = config.providers.tts.iter_entries().next() {
++        bail!("lath: refused provider `providers.tts.{family}.{alias}`");
++    }
++    if let Some((family, alias, _)) = config.providers.transcription.iter_entries().next() {
++        bail!("lath: refused provider `providers.transcription.{family}.{alias}`");
++    }
++    let mut agents: Vec<_> = config.agents.iter().collect();
++    agents.sort_by(|a, b| a.0.cmp(b.0));
++    for (alias, agent) in agents {
++        let reference = agent.model_provider.as_str();
++        let family = reference.split_once('.').map_or(reference, |(f, _)| f);
++        if family != LATH_PROVIDER_FAMILY {
++            bail!(
++                "lath: refused `agents.{alias}.model_provider = \"{reference}\"`: the Lath build \
++                 reaches the model only through one `custom` provider"
++            );
++        }
++    }
++    Ok(())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use zeroclaw_config::schema::{AliasedAgentConfig, ModelRouteConfig};
++
++    /// The CONTRACT shape: one `custom.lath` provider, one agent on it.
++    fn lath_config() -> Config {
++        let mut cfg = Config::default();
++        let entry = cfg.providers.models.ensure("custom", "lath").unwrap();
++        entry.model = Some("m".into());
++        entry.uri = Some("http://localhost/v1".into());
++        let agent = AliasedAgentConfig {
++            model_provider: "custom.lath".into(),
++            ..AliasedAgentConfig::default()
++        };
++        cfg.agents.insert("lath".into(), agent);
++        cfg
++    }
++
++    #[test]
++    fn construction_accepts_custom() {
++        check_construction("custom", "custom", None).unwrap();
++        check_construction("custom", "custom", Some("chat_completions")).unwrap();
++    }
++
++    #[test]
++    fn construction_refuses_every_other_family_by_name() {
++        for family in ["openrouter", "openai", "anthropic", "ollama", "gemini"] {
++            let err = check_construction(family, family, None)
++                .unwrap_err()
++                .to_string();
++            assert!(err.contains(family), "{err}");
++        }
++    }
++
++    #[test]
++    fn construction_refuses_the_legacy_url_form() {
++        let err = check_construction("custom:https://evil.example", "custom", None)
++            .unwrap_err()
++            .to_string();
++        assert!(err.contains("custom:https://evil.example"), "{err}");
++    }
++
++    #[test]
++    fn construction_refuses_the_responses_wire() {
++        let err = check_construction("custom", "custom", Some("responses"))
++            .unwrap_err()
++            .to_string();
++        assert!(err.contains("responses"), "{err}");
++    }
++
++    #[test]
++    fn config_walk_accepts_one_custom_provider() {
++        check_config(&lath_config(), None).unwrap();
++    }
++
++    #[test]
++    fn config_walk_refuses_a_second_family() {
++        let mut cfg = lath_config();
++        cfg.providers
++            .models
++            .ensure("openrouter", "default")
++            .unwrap();
++        let err = check_config(&cfg, None).unwrap_err().to_string();
++        assert!(err.contains("providers.models.openrouter.default"), "{err}");
++    }
++
++    #[test]
++    fn config_walk_refuses_a_fallback() {
++        let mut cfg = lath_config();
++        let entry = cfg.providers.models.ensure("custom", "lath").unwrap();
++        entry.fallback = vec!["custom.other".into()];
++        let err = check_config(&cfg, None).unwrap_err().to_string();
++        assert!(err.contains("custom.other"), "{err}");
++    }
++
++    #[test]
++    fn config_walk_refuses_a_fallback_model() {
++        let mut cfg = lath_config();
++        let entry = cfg.providers.models.ensure("custom", "lath").unwrap();
++        entry.fallback_models = vec!["other-model".into()];
++        let err = check_config(&cfg, None).unwrap_err().to_string();
++        assert!(err.contains("other-model"), "{err}");
++    }
++
++    #[test]
++    fn config_walk_refuses_a_route() {
++        let mut cfg = lath_config();
++        cfg.model_routes.push(ModelRouteConfig {
++            hint: "fast".into(),
++            model_provider: "openrouter.default".into(),
++            model: "x".into(),
++            api_key: None,
++        });
++        let err = check_config(&cfg, None).unwrap_err().to_string();
++        assert!(err.contains("fast"), "{err}");
++    }
++
++    #[test]
++    fn config_walk_refuses_the_responses_wire() {
++        let mut cfg = lath_config();
++        let entry = cfg.providers.models.ensure("custom", "lath").unwrap();
++        entry.wire_api = Some(WireApi::Responses);
++        let err = check_config(&cfg, None).unwrap_err().to_string();
++        assert!(err.contains("wire_api"), "{err}");
++    }
++
++    #[test]
++    fn config_walk_refuses_a_kind_override() {
++        let mut cfg = lath_config();
++        let entry = cfg.providers.models.ensure("custom", "lath").unwrap();
++        entry.kind = Some("openrouter".into());
++        let err = check_config(&cfg, None).unwrap_err().to_string();
++        assert!(err.contains("openrouter"), "{err}");
++    }
++
++    #[test]
++    fn config_walk_refuses_an_agent_on_another_family() {
++        let mut cfg = lath_config();
++        cfg.agents.get_mut("lath").unwrap().model_provider = "openrouter.default".into();
++        let err = check_config(&cfg, None).unwrap_err().to_string();
++        assert!(err.contains("openrouter.default"), "{err}");
++    }
++
++    #[test]
++    fn config_walk_refuses_a_command_line_provider() {
++        let err = check_config(&lath_config(), Some("openrouter"))
++            .unwrap_err()
++            .to_string();
++        assert!(err.contains("openrouter"), "{err}");
++    }
++
++    #[test]
++    fn the_walk_sees_custom_entries_under_the_family_the_construction_check_uses() {
++        let families: Vec<_> = lath_config()
++            .providers
++            .models
++            .iter_entries()
++            .map(|e| e.0)
++            .collect();
++        assert_eq!(families, vec![LATH_PROVIDER_FAMILY]);
++    }
++}
+diff --git a/crates/zeroclaw-providers/src/lib.rs b/crates/zeroclaw-providers/src/lib.rs
+index cb3dafe..a3bbc0a 100644
+--- a/crates/zeroclaw-providers/src/lib.rs
++++ b/crates/zeroclaw-providers/src/lib.rs
+@@ -16,6 +16,8 @@ pub mod grok_cli;
+ // glm.rs excluded — not compiled in upstream (dead code with known issues)
+ pub mod hailo_ollama;
+ pub mod kilocli;
++#[cfg(feature = "lath")]
++pub mod lath;
+ pub mod model_pin;
+ pub mod models_dev;
+ pub mod multimodal;
+@@ -1595,6 +1597,23 @@ fn create_model_provider_inner(
+         }
+     }
+     let (split_name, split_url) = split_v2_colon_url(raw_name);
++    // The Lath build constructs one family and nothing else; checked here
++    // because every construction path, fallbacks and routes included, passes
++    // through this function (see `lath`).
++    #[cfg(feature = "lath")]
++    lath::check_construction(
++        raw_name,
++        options
++            .provider_kind
++            .as_deref()
++            .map(str::trim)
++            .filter(|value| !value.is_empty())
++            .map_or(
++                canonicalize_v2_model_provider_name(split_name),
++                canonicalize_v2_model_provider_name,
++            ),
++        options.wire_api.as_deref(),
++    )?;
+     let legacy_kimi_code = is_legacy_kimi_code_alias(split_name);
+     let api_url = api_url.or(split_url);
+     let name = canonicalize_v2_model_provider_name(split_name);
+diff --git a/crates/zeroclaw-providers/src/multimodal.rs b/crates/zeroclaw-providers/src/multimodal.rs
+index e326223..5944880 100644
+--- a/crates/zeroclaw-providers/src/multimodal.rs
++++ b/crates/zeroclaw-providers/src/multimodal.rs
+@@ -1539,7 +1539,10 @@ async fn normalize_image_reference(
+     }
+ 
+     if source.starts_with("http://") || source.starts_with("https://") {
+-        if !config.allow_remote_fetch {
++        // The Lath build never downloads an image: `allow_remote_fetch` is
++        // ignored there, because the only connection a step may open is its
++        // provider's.
++        if !config.allow_remote_fetch || cfg!(feature = "lath") {
+             return Err(MultimodalError::RemoteFetchDisabled {
+                 input: source.to_string(),
+             }
+@@ -4022,6 +4025,29 @@ mod tests {
+         }
+     }
+ 
++    /// The Lath build refuses a remote image before any request is built, even
++    /// when the config allows remote fetches.
++    #[cfg(feature = "lath")]
++    #[tokio::test]
++    async fn lath_build_refuses_remote_images_even_when_allowed() {
++        let config = MultimodalConfig {
++            allow_remote_fetch: true,
++            ..MultimodalConfig::default()
++        };
++        let client = reqwest::Client::builder().no_proxy().build().unwrap();
++        let err =
++            normalize_image_reference("https://example.com/img.png", &config, 1024, &client, None)
++                .await
++                .unwrap_err();
++        assert!(
++            matches!(
++                err.downcast_ref::<MultimodalError>(),
++                Some(MultimodalError::RemoteFetchDisabled { .. })
++            ),
++            "{err}"
++        );
++    }
++
+     #[tokio::test]
+     async fn prepare_messages_skips_remote_url_when_disabled() {
+         let messages = vec![ChatMessage::user(
+diff --git a/crates/zeroclaw-runtime/Cargo.toml b/crates/zeroclaw-runtime/Cargo.toml
+index 01d9647..a4b7ca4 100644
+--- a/crates/zeroclaw-runtime/Cargo.toml
++++ b/crates/zeroclaw-runtime/Cargo.toml
+@@ -129,6 +129,9 @@ sandbox-bubblewrap = []
+ # any production dependency edge, so these helpers are absent from shipped
+ # builds.
+ test-util = []
++# The Lath build (root feature `lath`): the Lath tool registry in place of the
++# full one, the network tool modules not compiled, no skills, no shell.
++lath = ["zeroclaw-providers/lath", "zeroclaw-config/lath", "zeroclaw-tools/lath"]
+ 
+ [dev-dependencies]
+ axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+diff --git a/crates/zeroclaw-runtime/src/lib.rs b/crates/zeroclaw-runtime/src/lib.rs
+index bcf02ca..8a6131a 100644
+--- a/crates/zeroclaw-runtime/src/lib.rs
++++ b/crates/zeroclaw-runtime/src/lib.rs
+@@ -48,3 +48,21 @@ pub mod tools;
+ pub mod trust;
+ pub mod tunnel;
+ pub mod verifiable_intent;
++
++// The same guard as the root crate's, for a build that enables this crate's
++// features directly: the Lath registry has no room for the WASM host, a
++// browser driver or a sandbox backend that spawns a helper.
++#[cfg(all(
++    feature = "lath",
++    any(
++        feature = "plugins-wasm",
++        feature = "plugins-wasm-cranelift",
++        feature = "browser-native",
++        feature = "sandbox-landlock",
++        feature = "sandbox-bubblewrap",
++    )
++))]
++compile_error!(
++    "zeroclaw-runtime's `lath` feature cannot be combined with plugins-wasm*, browser-native \
++     or sandbox-*"
++);
+diff --git a/crates/zeroclaw-tools/Cargo.toml b/crates/zeroclaw-tools/Cargo.toml
+index 348ce08..21800d1 100644
+--- a/crates/zeroclaw-tools/Cargo.toml
++++ b/crates/zeroclaw-tools/Cargo.toml
+@@ -78,6 +78,8 @@ probe = ["dep:probe-rs"]
+ # constructors panic on real use and exist purely to keep
+ # daemon-side tests self-contained.
+ test-helpers = []
++# The Lath build: the tool modules that open a network connection are not compiled.
++lath = []
+ 
+ [dev-dependencies]
+ zeroclaw-infra.workspace = true
+diff --git a/src/lath.rs b/src/lath.rs
+new file mode 100644
+index 0000000..d7e64b5
+--- /dev/null
++++ b/src/lath.rs
+@@ -0,0 +1,141 @@
++//! The Lath build's one command: `zeroclaw agent -a <alias> -m <message>`.
++//!
++//! A Lath host runs each loop step as one invocation of this binary, with a
++//! config directory it wrote for that step, under a wrapper that leaves the
++//! process two Unix sockets and its workspace. This module is the whole of
++//! what the binary does with that invocation: check that the config is the
++//! posture the host committed, run one agent turn through the full agent loop,
++//! print the final text on stdout, and exit. Anything the host did not ask for
++//! is refused with a message that names it, because a step that quietly runs
++//! with a wider posture than its committed one is worse than a failed step.
++
++use anyhow::{Result, bail};
++use std::path::PathBuf;
++use zeroclaw_config::schema::Config;
++
++/// The `agent` subcommand's arguments, as the CLI parsed them.
++#[derive(Debug, Clone, Default)]
++pub struct AgentArgs {
++    pub agent: String,
++    pub message: Option<String>,
++    pub session_state_file: Option<PathBuf>,
++    pub model_provider: Option<String>,
++    pub model: Option<String>,
++    pub temperature: Option<f64>,
++    pub peripheral: Vec<String>,
++}
++
++/// Refuse the parts of the `agent` command line a Lath step never uses.
++///
++/// Each would widen the run: interactive mode reads a terminal the host does
++/// not attach, a session file is a write outside the room's two directories,
++/// and a peripheral opens a device.
++pub fn check_args(args: &AgentArgs) -> Result<()> {
++    if args.message.is_none() {
++        bail!(
++            "lath: `agent` needs `-m <message>`: the Lath build runs one turn and has no \
++             interactive mode"
++        );
++    }
++    if let Some(path) = &args.session_state_file {
++        bail!(
++            "lath: refused `--session-state-file {}`: a step keeps no session outside its \
++             config directory",
++            path.display()
++        );
++    }
++    if let Some(board) = args.peripheral.first() {
++        bail!("lath: refused `--peripheral {board}`: the Lath build opens no device");
++    }
++    Ok(())
++}
++
++/// Check the step's posture, then run its one turn.
++pub async fn run_agent(config: Config, args: AgentArgs) -> Result<()> {
++    check_args(&args)?;
++    if config.agent(&args.agent).is_none() {
++        bail!(
++            "`zeroclaw agent --agent {}` is not configured (no [agents.{}] entry)",
++            args.agent,
++            args.agent
++        );
++    }
++    zeroclaw_providers::lath::check_config(&config, args.model_provider.as_deref())?;
++
++    let temperature = args.temperature.or_else(|| {
++        config
++            .model_provider_for_agent(&args.agent)
++            .and_then(|e| e.temperature)
++    });
++    let AgentArgs {
++        agent,
++        message,
++        model_provider,
++        model,
++        ..
++    } = args;
++    Box::pin(zeroclaw_runtime::agent::loop_::run(
++        config,
++        &agent,
++        message,
++        model_provider,
++        model,
++        temperature,
++        Vec::new(),
++        true,
++        None,
++        None,
++        zeroclaw_api::ingress::TurnOrigin::Interactive,
++        zeroclaw_runtime::agent::loop_::AgentRunOverrides::default(),
++    ))
++    .await
++    .map(|_| ())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn one_shot() -> AgentArgs {
++        AgentArgs {
++            agent: "lath".into(),
++            message: Some("step".into()),
++            ..AgentArgs::default()
++        }
++    }
++
++    #[test]
++    fn the_one_shot_form_is_accepted() {
++        check_args(&one_shot()).unwrap();
++    }
++
++    #[test]
++    fn interactive_mode_is_refused() {
++        let args = AgentArgs {
++            message: None,
++            ..one_shot()
++        };
++        let err = check_args(&args).unwrap_err().to_string();
++        assert!(err.contains("-m"), "{err}");
++    }
++
++    #[test]
++    fn a_session_file_is_refused_by_name() {
++        let args = AgentArgs {
++            session_state_file: Some("/tmp/s.json".into()),
++            ..one_shot()
++        };
++        let err = check_args(&args).unwrap_err().to_string();
++        assert!(err.contains("/tmp/s.json"), "{err}");
++    }
++
++    #[test]
++    fn a_peripheral_is_refused_by_name() {
++        let args = AgentArgs {
++            peripheral: vec!["nucleo-f401re".into()],
++            ..one_shot()
++        };
++        let err = check_args(&args).unwrap_err().to_string();
++        assert!(err.contains("nucleo-f401re"), "{err}");
++    }
++}
+diff --git a/src/lib.rs b/src/lib.rs
+index 33aede4..7b83a84 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -93,6 +93,37 @@ pub mod verifiable_intent;
+ #[cfg(feature = "plugins-wasm")]
+ pub mod plugins;
+ 
++#[cfg(feature = "lath")]
++pub mod lath;
++
++// The Lath build is the one-shot agent over one provider, with no network but
++// its provider's socket. Each feature named here would put a network client,
++// a process spawner or the WASM host back into that binary, so the combination
++// is a build error rather than a binary that quietly reaches further than its
++// posture says.
++#[cfg(all(
++    feature = "lath",
++    any(
++        feature = "agent-runtime",
++        feature = "gateway",
++        feature = "plugins-wasm",
++        feature = "plugins-wasm-runtime-only",
++        feature = "plugins-wasm-cranelift",
++        feature = "plugins-wasm-pulley",
++        feature = "browser-native",
++        feature = "hardware",
++        feature = "peripheral-rpi",
++        feature = "probe",
++        feature = "sandbox-landlock",
++        feature = "sandbox-bubblewrap",
++    )
++))]
++compile_error!(
++    "the `lath` feature cannot be combined with agent-runtime, gateway, plugins-wasm*, \
++     browser-native, hardware, peripheral-rpi, probe or sandbox-*: build it with \
++     `--no-default-features --features lath`"
++);
++
+ pub use config::Config;
+ 
+ /// Gateway management subcommands
+diff --git a/src/main.rs b/src/main.rs
+index c65c504..82f15ae 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -49,11 +49,11 @@ use crossterm::{
+     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
+ };
+ 
+-#[cfg(any(not(feature = "agent-runtime"), windows))]
++#[cfg(any(not(any(feature = "agent-runtime", feature = "lath")), windows))]
+ const STDIN_LINE_CAP: usize = 1024 * 1024;
+ 
+ /// Result of [`read_capped_line`].
+-#[cfg(not(feature = "agent-runtime"))]
++#[cfg(not(any(feature = "agent-runtime", feature = "lath")))]
+ #[derive(Debug)]
+ enum CappedLine {
+     /// A full line under the cap, with the trailing `\n` stripped.
+@@ -65,7 +65,7 @@ enum CappedLine {
+     Eof,
+ }
+ 
+-#[cfg(not(feature = "agent-runtime"))]
++#[cfg(not(any(feature = "agent-runtime", feature = "lath")))]
+ fn read_capped_line<R: std::io::BufRead>(reader: R, cap: usize) -> std::io::Result<CappedLine> {
+     let mut raw = Vec::new();
+     let mut limited = reader.take((cap + 1) as u64);
+@@ -100,7 +100,7 @@ fn cap_line_utf8_safe(line: &mut String, cap: usize) {
+ /// that `read_until(..., &mut Vec::new())` would incur on an oversized
+ /// physical line, and it stops exactly at the newline so the next line
+ /// is not consumed.
+-#[cfg(not(feature = "agent-runtime"))]
++#[cfg(not(any(feature = "agent-runtime", feature = "lath")))]
+ fn discard_until_newline<R: std::io::BufRead>(reader: &mut R) -> std::io::Result<()> {
+     loop {
+         let buf = reader.fill_buf()?;
+@@ -1700,6 +1700,9 @@ enum LocalesCommands {
+ /// Stub enum that mirrors the old `props` subcommands so clap can still parse
+ /// `zeroclaw props <anything>` and print a deprecation message.
+ #[derive(Subcommand, Debug)]
++// The Lath build refuses `props` with every other non-`agent` command, so the
++// captured arguments are parsed but never read there.
++#[cfg_attr(feature = "lath", allow(dead_code))]
+ enum DeprecatedPropsCommands {
+     #[command(external_subcommand)]
+     Any(Vec<String>),
+@@ -5288,6 +5291,9 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
+     }
+ 
+     // All other commands need config loaded first
++    // Only the kernel and runtime dispatch below mutate it; the Lath arm hands
++    // it to the agent loop as loaded.
++    #[cfg_attr(feature = "lath", allow(unused_mut))]
+     let mut config = Box::pin(Config::load_or_init()).await?;
+     let running_executable =
+         running_executable_for_remediation().map(|path| path.display().to_string());
+@@ -5375,7 +5381,40 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
+         }
+     }
+ 
+-    #[cfg(not(feature = "agent-runtime"))]
++    // The Lath build runs one command, `agent -a <alias> -m <message>`, through
++    // the full agent loop over the Lath tool registry; every other command the
++    // kernel CLI would offer is refused rather than half-supported. Every block
++    // below is compiled out under `lath`, so this one is the function's tail.
++    #[cfg(feature = "lath")]
++    {
++        let Commands::Agent {
++            agent,
++            message,
++            session_state_file,
++            model_provider,
++            model,
++            temperature,
++            peripheral,
++        } = cli.command
++        else {
++            anyhow::bail!("lath: this build runs `zeroclaw agent -a <alias> -m <message>` only");
++        };
++        Box::pin(zeroclaw::lath::run_agent(
++            config,
++            zeroclaw::lath::AgentArgs {
++                agent,
++                message,
++                session_state_file,
++                model_provider,
++                model,
++                temperature,
++                peripheral,
++            },
++        ))
++        .await
++    }
++
++    #[cfg(not(any(feature = "agent-runtime", feature = "lath")))]
+     {
+         // Kernel-only mode: minimal CLI agent without channels/tools/gateway
+         match cli.command {
+-- 
+2.50.1 (Apple Git-155)
+
