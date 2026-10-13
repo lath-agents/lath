@@ -7,7 +7,7 @@ one of those calls is also a record on Solana that commits its payment, so a use
 the money without taking the operator's word. The user's side is a capped USDC allowance approved once on Solana, and
 a second model, not the agent, decides when a goal loop is done.
 
-[Evidence page](https://getlath.xyz/evidence) · [getlath.xyz](https://getlath.xyz)
+[Demo video](https://youtu.be/Kqe1J-I7yO4) · [Evidence page](https://getlath.xyz/evidence) · [getlath.xyz](https://getlath.xyz)
 
 Lath runs on **Solana devnet** (records and the USDC allowance) and **Tempo mainnet** (model payments, in small
 amounts of real USDC.e). There is no hosted console: it runs on the operator's machine. A hosted private beta is
@@ -142,7 +142,7 @@ these suites is node-only: no chain, no key and no network.
 This page is the whole project in one read. Each section is short and ends in links to the detail: the docs by
 section, and the code by file.
 
-1. **Watch the demo video** (on the submission page): an agent is deployed, runs a goal loop in the sandbox, is stopped by the
+1. **Watch the [demo video](https://youtu.be/Kqe1J-I7yO4)**: an agent is deployed, runs a goal loop in the sandbox, is stopped by the
    decision model, gets a receipt on SAS, and is audited.
 2. **Read [Lath on Tempo](#lath-on-tempo) above, with [Tempo in the code](#tempo-in-the-code), then [the idea](#the-idea)
    and [the picture](#how-it-fits-together)** below.
