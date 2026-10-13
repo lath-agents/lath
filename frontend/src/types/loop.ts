@@ -19,7 +19,7 @@ import type { TemplateLinkView } from "./template";
 import type { SandboxSourceInput, ZeroClawStepRecord } from "./zeroclaw";
 
 /**
- * What wakes a run. `schedule` is the interval; `request` polls `lath-oracle` for a Pending
+ * What wakes a run. `schedule` is the interval; `request` polls the oracle program (ROADMAP.md) for a Pending
  * request naming the agent's key and steps once per request; `feed` is the interval plus an
  * `update_feed` at the end of every step. Only `schedule` steps in this build: the oracle triggers
  * are on the roadmap, and the other kinds stay so a row that carries one still reads, is refused on

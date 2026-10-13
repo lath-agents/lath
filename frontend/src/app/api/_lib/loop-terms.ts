@@ -306,7 +306,7 @@ export const GATE_ASK_DEPOSIT_BASE = BigInt(GATE_ASK_BASE * 240);
 // ─── Triggers ───────────────────────────────────────────────────────────────
 //
 // What decides a step. Only the clock steps a loop in this build. A `request` loop steps when a
-// Pending `Request` in `lath-oracle` names its key, a `feed` loop publishes each step's value to its
+// Pending `Request` in the oracle program (ROADMAP.md) names its key, a `feed` loop publishes each step's value to its
 // `Feed`, and a `gate` loop steps when a second model says so; all three are on the roadmap and have no
 // write side here. A start, a resume, a Retry or a template that asks for one is refused
 // (`removedFeatureOf` in `_lib/roadmap.ts`), and a running row that carries one is stopped before it

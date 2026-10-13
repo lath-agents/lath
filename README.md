@@ -142,7 +142,7 @@ these suites is node-only: no chain, no key and no network.
 This page is the whole project in one read. Each section is short and ends in links to the detail: the docs by
 section, and the code by file.
 
-1. **Watch the demo video** (linked above): an agent is deployed, runs a goal loop in the sandbox, is stopped by the
+1. **Watch the demo video** (on the submission page): an agent is deployed, runs a goal loop in the sandbox, is stopped by the
    decision model, gets a receipt on SAS, and is audited.
 2. **Read [Lath on Tempo](#lath-on-tempo) above, with [Tempo in the code](#tempo-in-the-code), then [the idea](#the-idea)
    and [the picture](#how-it-fits-together)** below.
@@ -324,9 +324,10 @@ The operator's treasury is
 [`0x18fBE5E0A83DCA440072059F91D1a23BaBE6e0B0`](https://explore.tempo.xyz/address/0x18fBE5E0A83DCA440072059F91D1a23BaBE6e0B0).
 
 **From a clone**, with no access to the operator's machine. `@lath/sdk` is not published to npm, so `lath-audit` runs
-from the repository. The filmed run is agent `squads-v4-review`, loop `loop-b37ba7c46db86bd4`, whose
-goal was reached at the step 4 checkpoint, seq 114; the commands below are filled in for it. With a Helius key the plain audit takes about
-four minutes, and `verify-channel` and `verify-step` about two each.
+from the repository. The filmed run is agent `squads-v4-review`, loop `loop-b37ba7c46db86bd4`: four steps, 20 paid
+model calls, 0.0599 USDC charged on Solana and 0.0547 USDC.e paid on Tempo, its goal reached at the step 4 checkpoint,
+seq 114, where the decision model answered achieved at 0.98. The commands below are filled in for it. With a Helius key
+the plain audit takes about four minutes, and `verify-channel` and `verify-step` about two each.
 
 ```bash
 git clone https://github.com/lath-agents/lath && cd lath && npm ci

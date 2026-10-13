@@ -1,7 +1,7 @@
 {
   "name": "@lath/runtime",
   "version": "0.1.0",
-  "description": "Agent runtime over the Lath payment and storage infrastructure",
+  "description": "Lath agent runtime: goal loops whose model calls are paid on Tempo and recorded on Solana",
   "license": "MIT",
   "type": "commonjs",
   "main": "./dist/index.js",

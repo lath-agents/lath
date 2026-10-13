@@ -59,7 +59,7 @@ export default function AuthorityPage({ params }: { params: Promise<{ key: strin
           <Skeleton rows={3} />
         ) : owners.isError ? (
           // A read that failed says why, never *not the authority of any agent*: that sentence is a
-          // claim about the chain, and a failed read established nothing about it (inv §5).
+          // claim about the chain, and a failed read established nothing about it.
           <ReadFailed error={owners.error} onRetry={() => void owners.refetch()} />
         ) : (owners.data?.length ?? 0) === 0 ? (
           <Empty>This key is not the authority of any agent on this cluster.</Empty>

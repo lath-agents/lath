@@ -2,7 +2,10 @@
   "name": "lath",
   "version": "0.1.0",
   "private": true,
-  "description": "Lath is payment and storage infrastructure for autonomous AI agents on Solana.",
+  "description": "Agent loops that pay for their own AI on Tempo, with a record of every payment anyone can replay on Solana.",
+  "license": "MIT",
+  "repository": "github:lath-agents/lath",
+  "homepage": "https://getlath.xyz",
   "engines": {
     "node": ">=20"
   },

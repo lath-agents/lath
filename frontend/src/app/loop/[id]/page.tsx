@@ -572,7 +572,7 @@ function LoopConfiguration({ loop, money }: { loop: LoopView; money: ReturnType<
   // how often it *looks*.
   const triggerHint =
     trigger.kind === "request"
-      ? "steps when a pending request in lath-oracle names this agent's key"
+      ? "steps when a pending oracle request names this agent's key"
       : trigger.kind === "feed"
       ? "steps on the interval, and publishes every step's value to this loop's one feed account"
       : "steps on the interval; nothing off this chain is written";

@@ -1,7 +1,7 @@
 {
   "name": "@lath/sdk",
   "version": "0.1.0",
-  "description": "TypeScript SDK for Lath: payment and storage infrastructure for autonomous AI agents on Solana",
+  "description": "TypeScript SDK for Lath: agent records on Solana, model calls paid on Tempo, and the lath-audit CLI",
   "license": "MIT",
   "type": "commonjs",
   "main": "./dist/index.js",

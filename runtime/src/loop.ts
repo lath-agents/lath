@@ -51,7 +51,7 @@
  * next one instead of racing it for seqs.
  *
  * **Only the clock steps a loop in this build.** The oracle triggers (a step woken by a
- * `lath-oracle` `Request`, or one that publishes to a `Feed`) and gated loops (a step woken by a
+ * the oracle program's `Request`, or one that publishes to a `Feed`) and gated loops (a step woken by a
  * second model) are on the roadmap: this build neither writes nor verifies them. A step's manifest
  * keeps the keys they set (`requestAddress`, `gateHash`), so an older step that carries one still
  * re-derives its leaf here, and `verify-step` names such a step as one this build does not verify.
