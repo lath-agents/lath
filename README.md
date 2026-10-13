@@ -7,7 +7,7 @@ one of those calls is also a record on Solana that commits its payment, so a use
 the money without taking the operator's word. The user's side is a capped USDC allowance approved once on Solana, and
 a second model, not the agent, decides when a goal loop is done.
 
-[Demo video](https://youtu.be/Kqe1J-I7yO4) · [Evidence page](https://getlath.xyz/evidence) · [getlath.xyz](https://getlath.xyz)
+[Demo video](https://youtu.be/Kqe1J-I7yO4) · [Verification document](docs/verification.pdf) · [getlath.xyz](https://getlath.xyz)
 
 Lath runs on **Solana devnet** (records and the USDC allowance) and **Tempo mainnet** (model payments, in small
 amounts of real USDC.e). There is no hosted console: it runs on the operator's machine. A hosted private beta is
@@ -16,7 +16,7 @@ planned and not open.
 ## What you can ask
 
 A loop answers a question about a Solana protocol from sources pinned before it starts: the code at a commit and the
-program's accounts at a slot. Each claim cites its file, and the evidence page links every file, step and payment. The
+program's accounts at a slot. Each claim cites its file, and the verification document links every file, step and payment. The
 filmed run asks: _Before I approve a Squads transaction, who can upgrade this program, and what does each instruction
 that moves funds check?_ Questions about activity over time, such as usage in the last 30 days, do not fit yet.
 
@@ -146,7 +146,7 @@ section, and the code by file.
    decision model, gets a receipt on SAS, and is audited.
 2. **Read [Lath on Tempo](#lath-on-tempo) above, with [Tempo in the code](#tempo-in-the-code), then [the idea](#the-idea)
    and [the picture](#how-it-fits-together)** below.
-3. **Open the [evidence page](https://getlath.xyz/evidence)**: every fact of the filmed run, each linked to Solana's or
+3. **Open the [verification document](docs/verification.pdf)**: one page with every fact of the filmed run, each linked to Solana's or
    Tempo's explorer. What is deployed and live is in [Development and proof](#development-and-proof).
 4. **Re-run the audit** from a clone, with no access to the operator's machine: [Check it yourself](#check-it-yourself).
 
@@ -317,7 +317,7 @@ sentence. The treasury should hold the loop's budget plus Lath's decision share:
 
 ## Check it yourself
 
-**No install.** The [evidence page](https://getlath.xyz/evidence) for the filmed run links each step's checkpoint, the
+**No install.** The [verification document](docs/verification.pdf) for the filmed run links each step's checkpoint, the
 USDC debits in the loop's window and the receipt on [Solana Explorer](https://explorer.solana.com/?cluster=devnet), and
 the loop's access key, payment channel, storage payments and settlement on [Tempo's explorer](https://explore.tempo.xyz).
 The operator's treasury is
@@ -521,7 +521,7 @@ ZeroClaw and runs its air-gap probe on Linux and macOS, and runs `tests/devnet.t
 
 What this repository deploys, and what it has paid on Tempo, each line linked to a public explorer so it can be
 checked without the operator. Slots are program-data slots, as `solana program show` reports them; dates are UTC. The
-filmed run's records, debits, payments and receipt are on the [evidence page](https://getlath.xyz/evidence).
+filmed run's records, debits, payments and receipt are in the [verification document](docs/verification.pdf).
 
 | What | Where | Check it |
 | ---- | ----- | -------- |
