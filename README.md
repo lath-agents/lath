@@ -1,4 +1,4 @@
-# Lath
+# <img src="frontend/public/lath-mark.svg" width="40" height="40" alt="" align="top"> Lath
 
 **Agent loops that pay for their own AI on Tempo, with a record of every payment anyone can replay on Solana.**
 Lath is for teams that run agents on their users' behalf. Each loop pays OpenRouter for every model call over a Tempo
